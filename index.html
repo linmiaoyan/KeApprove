@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>管理中心 - 添加车牌 & 重置网络密码</title>
+    <link rel="stylesheet" href="css/bootstrap.min.css" />
+    <link rel="stylesheet" href="css/common.css" />
+    <link rel="stylesheet" href="css/bootstrap-icons.css" />
+    <style>
+        .tab-bar {
+            max-width: 1000px;
+            margin: 20px auto 0;
+            padding: 0 20px;
+            display: flex;
+            gap: 10px;
+        }
+        .tab-btn {
+            border: 1px solid var(--border-color);
+            padding: 8px 14px;
+            border-radius: 999px;
+            background: var(--bg-white);
+            cursor: pointer;
+            font-size: 14px;
+            color: var(--text-secondary);
+        }
+        .tab-btn.active {
+            background: var(--primary-blue);
+            color: #fff;
+            border-color: var(--primary-blue);
+        }
+        .page-frame-wrap {
+            max-width: 1000px;
+            margin: 10px auto 20px;
+            padding: 0 20px 20px;
+        }
+        .page-frame {
+            width: 100%;
+            height: 680px;
+            border-radius: 10px;
+            border: 1px solid var(--border-color);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+            background: #fff;
+        }
+        .gate-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(15, 23, 42, 0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 2000;
+        }
+        .gate-card {
+            background: var(--bg-white);
+            border-radius: 12px;
+            padding: 1.75rem 2rem;
+            box-shadow: 0 10px 30px rgba(15, 23, 42, 0.25);
+            width: 320px;
+            border: 1px solid var(--border-color);
+        }
+        .gate-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 0.75rem;
+            color: var(--text-primary);
+        }
+        .gate-desc {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-bottom: 1rem;
+        }
+        .gate-input {
+            width: 100%;
+            padding: 6px 8px;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+            font-size: 13px;
+            box-sizing: border-box;
+        }
+        .gate-input:focus {
+            outline: none;
+            border-color: var(--primary-blue);
+            box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.2);
+        }
+        .gate-btn {
+            margin-top: 0.75rem;
+            width: 100%;
+            border: none;
+            border-radius: 6px;
+            padding: 6px 0;
+            background: var(--primary-blue);
+            color: #fff;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+        }
+        .gate-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        .gate-error {
+            margin-top: 0.5rem;
+            font-size: 12px;
+            color: var(--danger-color);
+        }
+    </style>
+</head>
+<body>
+    <nav class="top-navbar">
+        <div class="nav-container">
+            <a class="nav-link active" href="index.html"><i class="bi bi-speedometer2"></i> 管理中心</a>
+        </div>
+    </nav>
+
+    <div class="tab-bar" id="tabBar" style="display:none;">
+        <button type="button" class="tab-btn active" data-page="/pages/admin-review.html"><i class="bi bi-clipboard-check"></i> 管理员审核</button>
+        <button type="button" class="tab-btn" data-page="/pages/add-vehicle.html"><i class="bi bi-car-front"></i> 添加职工车牌</button>
+        <button type="button" class="tab-btn" data-page="/pages/reset-password.html"><i class="bi bi-key"></i> 重置网络密码</button>
+        <button type="button" class="tab-btn" data-page="/pages/leave-cycle.html"><i class="bi bi-calendar2-check"></i>学生周期请假</button>
+    </div>
+
+    <div class="page-frame-wrap" id="frameWrap" style="display:none;">
+        <iframe id="pageFrame" class="page-frame" src="" frameborder="0"></iframe>
+    </div>
+
+    <div class="gate-overlay" id="gate">
+        <div class="gate-card">
+            <div class="gate-title">访问口令验证</div>
+            <div class="gate-desc">请输入本页专用口令后继续访问。</div>
+            <input type="password" id="gateCode" class="gate-input" placeholder="请输入访问口令" />
+            <button type="button" id="gateBtn" class="gate-btn">进入管理中心</button>
+            <div id="gateError" class="gate-error"></div>
+        </div>
+    </div>
+
+    <script>
+        (function () {
+            var STORAGE_KEY = "autoAdminAccessOk";
+
+            var gate = document.getElementById("gate");
+            var gateInput = document.getElementById("gateCode");
+            var gateBtn = document.getElementById("gateBtn");
+            var gateError = document.getElementById("gateError");
+            var frame = document.getElementById("pageFrame");
+            var tabBar = document.getElementById("tabBar");
+            var frameWrap = document.getElementById("frameWrap");
+            var tabs = document.querySelectorAll(".tab-btn");
+
+            function initTabs() {
+                frame.src = "/pages/admin-review.html";
+                tabBar.style.display = "";
+                frameWrap.style.display = "";
+                tabs.forEach(function (btn) {
+                    btn.addEventListener("click", function () {
+                        tabs.forEach(function (b) { b.classList.remove("active"); });
+                        btn.classList.add("active");
+                        frame.src = btn.getAttribute("data-page");
+                    });
+                });
+            }
+
+            function unlock() {
+                gate.style.display = "none";
+                if (window.localStorage) {
+                    localStorage.setItem(STORAGE_KEY, "1");
+                }
+                initTabs();
+            }
+
+            function tryLocalUnlock() {
+                try {
+                    if (window.localStorage && localStorage.getItem(STORAGE_KEY) === "1") {
+                        unlock();
+                        return true;
+                    }
+                } catch (e) {}
+                return false;
+            }
+
+            fetch("/api/admin-gate-status")
+                .then(function (r) { return r.json(); })
+                .then(function (st) {
+                    if (!st || !st.gate_enabled) {
+                        unlock();
+                        return;
+                    }
+                    if (tryLocalUnlock()) return;
+
+                    gateBtn.addEventListener("click", function () {
+                        var v = (gateInput.value || "").trim();
+                        if (!v) {
+                            gateError.textContent = "请输入口令";
+                            return;
+                        }
+                        gateBtn.disabled = true;
+                        gateError.textContent = "";
+                        fetch("/api/admin-gate-check", {
+                            method: "POST",
+                            headers: { "content-type": "application/json" },
+                            body: JSON.stringify({ code: v })
+                        })
+                            .then(function (r) { return r.json(); })
+                            .then(function (d) {
+                                if (d && (d.ok || d.skip)) {
+                                    gateError.textContent = "";
+                                    unlock();
+                                } else {
+                                    gateError.textContent = "口令错误";
+                                }
+                            })
+                            .catch(function () {
+                                gateError.textContent = "校验失败，请稍后重试";
+                            })
+                            .finally(function () {
+                                gateBtn.disabled = false;
+                            });
+                    });
+
+                    gateInput.addEventListener("keydown", function (e) {
+                        if (e.key === "Enter") {
+                            gateBtn.click();
+                        }
+                    });
+                })
+                .catch(function () {
+                    gateError.textContent = "无法连接服务，请确认已启动后端";
+                });
+        })();
+    </script>
+</body>
+</html>

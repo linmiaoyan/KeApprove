@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>普通教师申请</title>
+    <link rel="stylesheet" href="/css/bootstrap.min.css" />
+    <link rel="stylesheet" href="/css/common.css" />
+    <link rel="stylesheet" href="/css/bootstrap-icons.css" />
+    <style>
+        .wrap { max-width: 920px; margin: 18px auto; padding: 0 14px; }
+        .cardx { background: var(--bg-white); border: 1px solid var(--border-color); border-radius: 12px; padding: 14px; box-shadow: 0 2px 8px rgba(0,0,0,.08); }
+        .muted { color: var(--text-secondary); font-size: 13px; }
+        .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+        textarea { resize: vertical; }
+        #status.ok { color: var(--success-color); }
+        #status.err { color: var(--danger-color); white-space: pre-wrap; }
+        .kv { font-size: 13px; }
+        .kv b { color: var(--text-primary); }
+    </style>
+</head>
+<body>
+<div class="wrap">
+    <div class="cardx mb-3">
+        <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+            <div>
+                <div class="h5 mb-1"><i class="bi bi-chat-square-text"></i> 普通教师申请</div>
+                <div class="muted">输入一句话 → 自动解析申请类型与参数 → 确认后进入审批队列。</div>
+            </div>
+            <div class="muted">提示：目前“重置网络密码”接口未完全测试，建议先只入队不执行。</div>
+        </div>
+    </div>
+
+    <div class="cardx mb-3">
+        <div class="mb-2"><b>自然语言输入</b></div>
+        <textarea id="nlpText" class="form-control" rows="3" placeholder="例如：帮我给小明加一个临时车牌 浙C12345 开一年/小黑本周晚自习第2节请假，xxx找他有事"></textarea>
+        <div class="d-flex gap-2 mt-2 flex-wrap">
+            <button class="btn btn-outline-primary" id="parseBtn"><i class="bi bi-magic"></i> 解析</button>
+            <button class="btn btn-primary" id="submitBtn" disabled><i class="bi bi-send"></i> 确认提交到审批队列</button>
+            <div id="status" class="muted"></div>
+        </div>
+    </div>
+
+    <div class="cardx">
+        <div class="mb-2"><b>解析结果（可编辑 JSON）</b></div>
+        <div class="kv mb-2 muted">字段：<b>type</b>（申请类型） + <b>params</b>（参数）</div>
+        <textarea id="reqJson" class="form-control mono" rows="10" placeholder='{\n  "type": "add_vehicle",\n  "params": {\n    "name": "周秀东",\n    "plate_no": "浙CDJ9405",\n    "plate_type": "1",\n    "start_date": "2026-03-19",\n    "end_date": "2027-03-19",\n    "remark": ""\n  }\n}'></textarea>
+        <div class="muted mt-2">提交后管理员可审核；当前默认仅入队，不会自动执行外部接口。</div>
+    </div>
+</div>
+
+<script>
+const API_PARSE = "/api/request-parse";
+const API_CREATE = "/api/requests";
+
+function setStatus(text, type) {
+    const el = document.getElementById("status");
+    el.textContent = text || "";
+    el.className = type ? type : "muted";
+}
+
+async function parseNlp() {
+    const t = (document.getElementById("nlpText").value || "").trim();
+    if (!t) return setStatus("请输入一句话。", "err");
+    document.getElementById("parseBtn").disabled = true;
+    setStatus("解析中…", "muted");
+    try {
+        const r = await fetch(API_PARSE, {
+            method: "POST",
+            headers: {"content-type":"application/json"},
+            body: JSON.stringify({ text: t })
+        });
+        const d = await r.json().catch(()=>({}));
+        if (!r.ok || !d.ok) {
+            setStatus("解析失败：" + (d.msg || r.status), "err");
+            return;
+        }
+        document.getElementById("reqJson").value = JSON.stringify(d.data, null, 2);
+        document.getElementById("submitBtn").disabled = false;
+        setStatus("解析成功，请检查后提交。", "ok");
+    } catch (e) {
+        setStatus("请求失败：" + e.message, "err");
+    } finally {
+        document.getElementById("parseBtn").disabled = false;
+    }
+}
+
+async function submitReq() {
+    const raw = (document.getElementById("reqJson").value || "").trim();
+    if (!raw) return setStatus("请先解析或填写 JSON。", "err");
+    let obj = null;
+    try { obj = JSON.parse(raw); } catch (e) { return setStatus("JSON 格式错误：" + e.message, "err"); }
+    document.getElementById("submitBtn").disabled = true;
+    setStatus("提交中…", "muted");
+    try {
+        const r = await fetch(API_CREATE, {
+            method: "POST",
+            headers: {"content-type":"application/json"},
+            body: JSON.stringify(obj)
+        });
+        const d = await r.json().catch(()=>({}));
+        if (!r.ok || !d.ok) {
+            setStatus("提交失败：" + (d.msg || r.status), "err");
+            return;
+        }
+        setStatus("已进入审批队列，ID=" + d.id, "ok");
+    } catch (e) {
+        setStatus("请求失败：" + e.message, "err");
+    } finally {
+        document.getElementById("submitBtn").disabled = false;
+    }
+}
+
+document.getElementById("parseBtn").addEventListener("click", parseNlp);
+document.getElementById("submitBtn").addEventListener("click", submitReq);
+</script>
+</body>
+</html>
+

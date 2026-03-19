@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>管理员审核</title>
+    <link rel="stylesheet" href="/css/bootstrap.min.css" />
+    <link rel="stylesheet" href="/css/common.css" />
+    <link rel="stylesheet" href="/css/bootstrap-icons.css" />
+    <style>
+        .wrap { max-width: 980px; margin: 18px auto; padding: 0 14px; }
+        .cardx { background: var(--bg-white); border: 1px solid var(--border-color); border-radius: 12px; padding: 14px; box-shadow: 0 2px 8px rgba(0,0,0,.08); }
+        .muted { color: var(--text-secondary); font-size: 13px; }
+        .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+        pre { white-space: pre-wrap; }
+        .badge { font-weight: 600; }
+    </style>
+</head>
+<body>
+<div class="wrap">
+    <div class="cardx mb-3">
+        <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+            <div>
+                <div class="h5 mb-1"><i class="bi bi-clipboard-check"></i> 管理员审核</div>
+                <div class="muted">查看教师提交的申请，审核通过/驳回（当前仅更新状态，不自动执行外部接口）。</div>
+            </div>
+            <div class="d-flex gap-2 flex-wrap">
+                <select id="statusFilter" class="form-select form-select-sm" style="max-width: 160px;">
+                    <option value="pending">待审核</option>
+                    <option value="approved">已通过</option>
+                    <option value="rejected">已驳回</option>
+                    <option value="">全部</option>
+                </select>
+                <button class="btn btn-outline-secondary btn-sm" id="refreshBtn"><i class="bi bi-arrow-clockwise"></i> 刷新</button>
+            </div>
+        </div>
+        <div class="muted mt-2" id="hint"></div>
+    </div>
+
+    <div class="cardx">
+        <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>类型</th>
+                        <th>发起人</th>
+                        <th>状态</th>
+                        <th>创建时间</th>
+                        <th style="width: 220px;">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="tbody">
+                    <tr><td colspan="6" class="text-center muted">加载中…</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Detail Modal -->
+    <div class="modal fade" id="detailModal" tabindex="-1">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">申请详情</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="muted mb-2" id="detailMeta"></div>
+                    <pre class="mono" id="detailJson"></pre>
+                    <div class="mt-3">
+                        <label class="form-label">审核意见（可选）</label>
+                        <textarea id="reviewComment" class="form-control" rows="2" placeholder="例如：信息不全，请补充…"></textarea>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">关闭</button>
+                    <button type="button" class="btn btn-danger" id="rejectBtn">驳回</button>
+                    <button type="button" class="btn btn-success" id="approveBtn">通过</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="/js/bootstrap.bundle.min.js"></script>
+<script>
+const API_LIST = "/api/admin/requests";
+const API_GET = (id) => "/api/admin/requests/" + id;
+const API_REVIEW = (id) => "/api/admin/requests/" + id + "/review";
+
+function badge(status) {
+    if (status === "pending") return '<span class="badge text-bg-secondary">待审核</span>';
+    if (status === "approved") return '<span class="badge text-bg-success">已通过</span>';
+    if (status === "rejected") return '<span class="badge text-bg-danger">已驳回</span>';
+    return '<span class="badge text-bg-light">未知</span>';
+}
+function fmt(t) {
+    if (!t) return "-";
+    try { return new Date(t).toLocaleString("zh-CN"); } catch (e) { return t; }
+}
+
+let currentDetail = null;
+const modalEl = document.getElementById("detailModal");
+const modal = new bootstrap.Modal(modalEl);
+
+async function loadList() {
+    const st = document.getElementById("statusFilter").value;
+    const url = st ? (API_LIST + "?status=" + encodeURIComponent(st)) : API_LIST;
+    document.getElementById("hint").textContent = "加载中…";
+    const tbody = document.getElementById("tbody");
+    tbody.innerHTML = '<tr><td colspan="6" class="text-center muted">加载中…</td></tr>';
+    try {
+        const r = await fetch(url);
+        const d = await r.json().catch(()=>[]);
+        if (!r.ok) throw new Error(d.msg || d.detail || r.status);
+        if (!Array.isArray(d) || d.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" class="text-center muted">暂无记录</td></tr>';
+            document.getElementById("hint").textContent = "暂无记录";
+            return;
+        }
+        tbody.innerHTML = d.map(it => `
+            <tr>
+                <td>${it.id}</td>
+                <td>${it.type || "-"}</td>
+                <td>${(it.requester && (it.requester.name || it.requester.nick || it.requester.userId)) ? (it.requester.name || it.requester.nick || it.requester.userId) : "-"}</td>
+                <td>${badge(it.status)}</td>
+                <td>${fmt(it.created_at)}</td>
+                <td>
+                    <button class="btn btn-outline-primary btn-sm" onclick="openDetail(${it.id})">查看</button>
+                </td>
+            </tr>
+        `).join("");
+        document.getElementById("hint").textContent = "共 " + d.length + " 条";
+    } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-danger">加载失败：' + e.message + '</td></tr>';
+        document.getElementById("hint").textContent = "加载失败";
+    }
+}
+
+async function openDetail(id) {
+    document.getElementById("reviewComment").value = "";
+    currentDetail = null;
+    document.getElementById("detailMeta").textContent = "加载中…";
+    document.getElementById("detailJson").textContent = "";
+    try {
+        const r = await fetch(API_GET(id));
+        const d = await r.json().catch(()=>({}));
+        if (!r.ok || !d.ok) throw new Error(d.msg || r.status);
+        currentDetail = d.data;
+        const who = (currentDetail.requester && (currentDetail.requester.name || currentDetail.requester.nick || currentDetail.requester.userId)) ? (currentDetail.requester.name || currentDetail.requester.nick || currentDetail.requester.userId) : "-";
+        document.getElementById("detailMeta").textContent = `ID=${currentDetail.id}  类型=${currentDetail.type}  发起人=${who}  状态=${currentDetail.status}  创建=${fmt(currentDetail.created_at)}`;
+        document.getElementById("detailJson").textContent = JSON.stringify(currentDetail, null, 2);
+        modal.show();
+    } catch (e) {
+        alert("加载失败：" + e.message);
+    }
+}
+
+async function review(approved) {
+    if (!currentDetail) return;
+    const comment = (document.getElementById("reviewComment").value || "").trim();
+    try {
+        const r = await fetch(API_REVIEW(currentDetail.id), {
+            method: "POST",
+            headers: {"content-type":"application/json"},
+            body: JSON.stringify({ status: approved ? "approved" : "rejected", comment })
+        });
+        const d = await r.json().catch(()=>({}));
+        if (!r.ok || !d.ok) throw new Error(d.msg || r.status);
+        modal.hide();
+        await loadList();
+    } catch (e) {
+        alert("操作失败：" + e.message);
+    }
+}
+
+document.getElementById("refreshBtn").addEventListener("click", loadList);
+document.getElementById("statusFilter").addEventListener("change", loadList);
+document.getElementById("approveBtn").addEventListener("click", () => review(true));
+document.getElementById("rejectBtn").addEventListener("click", () => review(false));
+
+loadList();
+</script>
+</body>
+</html>
+

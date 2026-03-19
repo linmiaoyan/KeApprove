@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>添加职工车牌 - 管理中心</title>
+    <link rel="stylesheet" href="/css/bootstrap.min.css" />
+    <link rel="stylesheet" href="/css/common.css" />
+    <link rel="stylesheet" href="/css/bootstrap-icons.css" />
+    <style>
+        .form-card {
+            background-color: var(--bg-white);
+            border-radius: 10px;
+            padding: 1.5rem;
+            border: 1px solid var(--border-color);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+            max-width: 480px;
+        }
+        .form-card .form-label {
+            color: var(--text-secondary);
+            font-weight: 500;
+            margin-bottom: 0.35rem;
+        }
+        .form-card .form-control {
+            border-color: var(--border-color);
+            border-radius: 6px;
+        }
+        .form-card .form-control:focus {
+            border-color: var(--primary-blue);
+            box-shadow: 0 0 0 0.2rem rgba(37, 99, 235, 0.15);
+        }
+        .btn-primary-custom {
+            background-color: var(--primary-blue);
+            color: white;
+            border: none;
+            padding: 0.5rem 1.25rem;
+            border-radius: 6px;
+            font-weight: 500;
+            transition: all 0.2s ease;
+        }
+        .btn-primary-custom:hover {
+            background-color: var(--primary-blue-dark);
+            color: white;
+        }
+        .btn-primary-custom:disabled {
+            opacity: 0.65;
+            cursor: not-allowed;
+        }
+        #statusMsg {
+            min-height: 1.5rem;
+            font-size: 0.875rem;
+            margin-top: 0.75rem;
+        }
+        #statusMsg.ok { color: var(--success-color); }
+        #statusMsg.err { color: var(--danger-color); }
+        .picker-card {
+            background-color: var(--bg-white);
+            border-radius: 10px;
+            padding: 1rem;
+            border: 1px solid var(--border-color);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+            margin-bottom: 1.5rem;
+            max-width: 560px;
+        }
+        .picker-card .breadcrumb-wrap { font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 0.75rem; cursor: pointer; }
+.picker-card .breadcrumb-wrap:hover { color: var(--primary-blue); }
+        .picker-card .dept-list, .picker-card .user-list { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.75rem; }
+        .picker-card .dept-item, .picker-card .user-item {
+            padding: 0.4rem 0.75rem;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-gray);
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: all 0.2s ease;
+        }
+        .picker-card .dept-item:hover, .picker-card .user-item:hover {
+            border-color: var(--primary-blue);
+            background: rgba(37, 99, 235, 0.08);
+            color: var(--primary-blue);
+        }
+        .picker-card .user-item.selected { border-color: var(--primary-blue); background: rgba(37, 99, 235, 0.12); color: var(--primary-blue); font-weight: 500; }
+        .picker-card .selected-summary { font-size: 0.875rem; color: var(--text-secondary); margin-top: 0.5rem; }
+        .picker-card .selected-summary strong { color: var(--primary-blue); }
+        .picker-card .loading { color: var(--text-muted); font-size: 0.875rem; }
+    </style>
+</head>
+<body>
+    <div class="main-container">
+        <header>
+            <h1><i class="bi bi-plus-circle"></i> 添加职工车牌</h1>
+            <p class="text-secondary mb-0">先选择职工，再填写车牌信息并提交</p>
+        </header>
+
+        <div class="picker-card">
+            <div class="form-label"><i class="bi bi-people"></i> 选择部门和人员</div>
+            <div class="mb-2">
+                <div class="d-flex gap-2 align-items-center flex-wrap">
+                    <input type="text" class="form-control form-control-sm" id="nameSearch" placeholder="按姓名搜索当前列表" style="max-width: 220px;" />
+                    <button type="button" class="btn btn-outline-secondary btn-sm" id="globalSearchBtn" title="在整个通讯录中按姓名搜索">
+                        <i class="bi bi-search"></i> 全局搜索
+                    </button>
+                    <div class="small text-secondary" id="globalSearchOut"></div>
+                </div>
+            </div>
+            <div class="breadcrumb-wrap" id="breadcrumb">通讯录</div>
+            <div class="dept-list" id="deptList"></div>
+            <div class="user-list" id="userList"></div>
+            <div class="selected-summary" id="selectedSummary">未选择</div>
+        </div>
+
+        <div class="picker-card">
+            <div class="form-label"><i class="bi bi-chat-dots"></i> LLM 解析（从一句话提取姓名+车牌）</div>
+            <div class="mb-2">
+                <textarea class="form-control form-control-sm" id="llmVehicleInput" rows="2" placeholder="例如：瓯拳 周秀东 车牌是浙CDJ9405 车牌开一年"></textarea>
+            </div>
+            <div class="d-flex gap-2 flex-wrap">
+                <button type="button" class="btn btn-outline-custom" id="llmVehicleBtn"><i class="bi bi-magic"></i> 解析并填充</button>
+                <div class="small text-secondary" id="llmVehicleOut"></div>
+            </div>
+        </div>
+
+        <div class="form-card">
+            <div class="mb-3">
+                <div class="form-label"><i class="bi bi-person-check"></i> 平台管理员登录（用于自动获取车牌授权 token）</div>
+                <div class="row g-2">
+                    <div class="col-md-4">
+                        <input type="text" class="form-control" id="platUsr" placeholder="管理员账号" />
+                    </div>
+                    <div class="col-md-4">
+                        <input type="password" class="form-control" id="platPwd" placeholder="管理员密码" />
+                    </div>
+                    <div class="col-md-2">
+                        <input type="text" class="form-control" id="platVercode" placeholder="验证码(如有)" />
+                    </div>
+                    <div class="col-md-2 d-grid">
+                        <button type="button" class="btn btn-outline-custom" id="platLoginBtn"><i class="bi bi-box-arrow-in-right"></i> 登录</button>
+                    </div>
+                </div>
+                <div class="hint">先登录一次即可；登录态保存在本机 KeAdmin 服务内存中，重启 KeAdmin 需重新登录。</div>
+                <div id="platStatus" class="hint"></div>
+            </div>
+            <div class="mb-3">
+                <label class="form-label" for="eduAuthToken">云平台 Authorization Token（可选）</label>
+                <div class="d-flex gap-2 align-items-center flex-wrap">
+                    <input type="password" class="form-control" id="eduAuthToken" placeholder="仅当提示“请重新登录”时填写；本地会记住" style="max-width: 360px;" />
+                    <button type="button" class="btn btn-outline-secondary btn-sm" id="fetchTokenBtn" title="登录成功后点此从平台拉取 token 并填入"><i class="bi bi-arrow-repeat"></i> 获取当前 Token</button>
+                </div>
+                <div class="hint">用于 `edu.wzzd.cn` 的 `teamvehicle/form`；先登录后点「获取当前 Token」可自动填入。</div>
+            </div>
+            <div class="mb-3">
+                <label class="form-label" for="teamUid">关联车主（职工 ID）<span id="teamUidRequired" class="text-danger">*</span></label>
+                <input type="text" class="form-control" id="teamUid" placeholder="从上方选择人员后自动填充；临时车牌可不填" readonly />
+                <div class="form-text" id="teamUidHint">长期车牌必选职工；临时车牌可不填</div>
+            </div>
+            <div class="mb-3">
+                <label class="form-label" for="plateNo">车牌号码<span class="text-danger">*</span></label>
+                <input type="text" class="form-control" id="plateNo" placeholder="例如 浙C12345" maxlength="16" />
+            </div>
+            <div class="mb-3">
+                <label class="form-label" for="plateType">车牌类型</label>
+                <select class="form-control form-select" id="plateType">
+                    <option value="0">长期</option>
+                    <option value="1">临时</option>
+                </select>
+            </div>
+            <div class="mb-3" id="tempDateRow" style="display: none;">
+                <label class="form-label">临时车牌授权日期<span class="text-danger">*</span></label>
+                <div class="d-flex align-items-center gap-2 flex-wrap">
+                    <input type="date" class="form-control" id="startDate" style="max-width: 160px;" />
+                    <span class="text-secondary">至</span>
+                    <input type="date" class="form-control" id="endDate" style="max-width: 160px;" />
+                </div>
+            </div>
+            <div class="mb-4">
+                <label class="form-label" for="remark">备注说明</label>
+                <textarea class="form-control" id="remark" rows="2" placeholder="可选"></textarea>
+            </div>
+            <button type="button" class="btn btn-primary-custom" id="submitBtn">
+                <i class="bi bi-check-lg"></i> 提交保存
+            </button>
+            <div id="statusMsg"></div>
+        </div>
+    </div>
+
+    <script src="/js/add-vehicle.js"></script>
+</body>
+</html>

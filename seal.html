@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>校章申请</title>
+  <link rel="stylesheet" href="/css/bootstrap.min.css" />
+  <link rel="stylesheet" href="/css/common.css" />
+  <link rel="stylesheet" href="/css/bootstrap-icons.css" />
+  <style>
+    body { background: #f6f8fb; }
+    .wrap { max-width: 980px; margin: 18px auto; padding: 0 14px; }
+    .cardx { background: var(--bg-white); border: 1px solid var(--border-color); border-radius: 12px; padding: 14px; box-shadow: 0 2px 8px rgba(0,0,0,.08); }
+    .muted { color: var(--text-secondary); font-size: 13px; }
+    #status.ok { color: var(--success-color); }
+    #status.err { color: var(--danger-color); white-space: pre-wrap; }
+    .pdf-wrap { position: relative; border: 1px solid var(--border-color); border-radius: 10px; background: #fff; overflow: auto; max-height: 70vh; }
+    #pdfCanvas { width: 100%; height: auto; display: block; }
+    #overlay { position: absolute; inset: 0; pointer-events: auto; cursor: crosshair; }
+    .stamp { position: absolute; pointer-events: auto; user-select: none; }
+    .stamp .lbl { background: rgba(37,99,235,.92); color: #fff; border-radius: 6px; padding: 2px 8px; font-size: 12px; }
+    .stamp .del { position: absolute; top: -8px; right: -8px; width: 18px; height: 18px; border: none; border-radius: 50%; background: #dc3545; color: #fff; line-height: 18px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="cardx mb-3">
+      <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+        <div>
+          <div class="h5 mb-1"><i class="bi bi-patch-check"></i> 校章申请（上传 PDF + 选盖章位置）</div>
+          <div class="muted">此功能只做“申请入队 + 管理员审核”。暂不自动生成盖章后 PDF。</div>
+        </div>
+        <div class="d-flex flex-column align-items-end gap-1">
+          <div class="d-flex gap-2 flex-wrap align-items-center justify-content-end">
+            <span class="muted" id="meHint">未登录</span>
+            <button type="button" class="btn btn-primary btn-sm" id="h5LoginBtn" style="display:none;"><i class="bi bi-lightning-charge"></i> 钉钉内登录</button>
+            <a class="btn btn-outline-primary btn-sm" id="loginBtn" href="/auth/dingtalk/login?next=%2Fseal.html"><i class="bi bi-qr-code-scan"></i> 钉钉扫码登录</a>
+            <a class="btn btn-outline-secondary btn-sm" id="logoutBtn" href="/auth/logout" style="display:none;"><i class="bi bi-box-arrow-right"></i> 退出</a>
+            <a class="btn btn-outline-secondary btn-sm" href="/teacher.html"><i class="bi bi-arrow-left"></i> 返回教师申请</a>
+          </div>
+          <div class="muted small text-end" id="dingtalkEnvHint" style="max-width: 420px;"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row g-3">
+      <div class="col-md-4">
+        <div class="cardx">
+          <label class="form-label"><b>上传 PDF</b></label>
+          <input type="file" class="form-control" id="pdfFile" accept="application/pdf" />
+          <div class="muted mt-2">上传后在右侧预览，点击 PDF 选盖章点（可多点）。</div>
+          <div class="mt-3">
+            <label class="form-label">备注（可选）</label>
+            <textarea class="form-control" id="remark" rows="3" placeholder="例如：用于XX证明"></textarea>
+          </div>
+          <div class="mt-3 d-grid gap-2">
+            <button class="btn btn-primary" id="enqueueBtn" disabled><i class="bi bi-send"></i> 入队（提交校章申请）</button>
+            <div id="status" class="muted"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-md-8">
+        <div class="cardx">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <b>PDF 预览（点击选点）</b>
+            <span class="muted" id="countHint">已选：0 处</span>
+          </div>
+          <div class="pdf-wrap" id="pdfWrap">
+            <canvas id="pdfCanvas"></canvas>
+            <div id="overlay"></div>
+          </div>
+          <div class="muted mt-2">提示：拖动蓝色标签可微调；红色 × 可删除该点。</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/js/pdf.min.js"></script>
+  <script>if (typeof pdfjsLib !== 'undefined') pdfjsLib.GlobalWorkerOptions.workerSrc = '/js/pdf.worker.min.js';</script>
+  <script src="/js/dingtalk-h5-login.js"></script>
+  <script>
+    const API_SEAL = "/api/seal-request";
+    const API_ME = "/api/me";
+    const stampPositions = []; // {x,y} PDF points (current single-page)
+    let fileObj = null;
+    let pdfDoc = null;
+    let page = null;
+    let pdfW = 595, pdfH = 842;
+    let dispW = 0, dispH = 0, sX = 1, sY = 1;
+
+    function setStatus(t, cls){ const el=document.getElementById('status'); el.textContent=t||''; el.className=cls||'muted'; }
+    function setCount(){ document.getElementById('countHint').textContent = '已选：' + stampPositions.length + ' 处'; }
+
+    let loggedIn = false;
+    async function loadMe() {
+      try {
+        const r = await fetch(API_ME);
+        const d = await r.json().catch(()=>({}));
+        const hint = document.getElementById("meHint");
+        const loginBtn = document.getElementById("loginBtn");
+        const logoutBtn = document.getElementById("logoutBtn");
+        if (d && d.logged_in && d.user) {
+          const u = d.user;
+          loggedIn = true;
+          hint.textContent = "已登录：" + (u.summary || u.display_name || u.name || u.nick || u.userId || "未知");
+          loginBtn.style.display = "none";
+          logoutBtn.style.display = "";
+        } else {
+          loggedIn = false;
+          hint.textContent = "未登录（提交前需钉钉扫码）";
+          loginBtn.style.display = "";
+          logoutBtn.style.display = "none";
+        }
+      } catch (e) {
+        loggedIn = false;
+      }
+    }
+
+    function calcScale(){
+      const c=document.getElementById('pdfCanvas');
+      const r=c.getBoundingClientRect();
+      dispW=r.width||c.offsetWidth||800;
+      dispH=r.height||c.offsetHeight||1000;
+      const lw=c.width||dispW, lh=c.height||dispH;
+      const d2lX=dispW/lw, d2lY=dispH/lh;
+      const lSX=lw/pdfW, lSY=lh/pdfH;
+      sX=lSX*d2lX; sY=lSY*d2lY;
+      const o=document.getElementById('overlay');
+      o.style.width = r.width+'px'; o.style.height=r.height+'px';
+    }
+    function pdfToScreen(x,y){ calcScale(); return { x: x*sX, y: dispH-(y*sY) }; }
+    function screenToPdf(x,y){ calcScale(); return { x: x/sX, y: (dispH-y)/sY }; }
+
+    function renderStamps(){
+      const o=document.getElementById('overlay');
+      o.querySelectorAll('.stamp').forEach(n=>n.remove());
+      stampPositions.forEach((p,idx)=>{
+        const sc=pdfToScreen(p.x,p.y);
+        const d=document.createElement('div');
+        d.className='stamp';
+        d.style.left=sc.x+'px';
+        d.style.top=sc.y+'px';
+        d.dataset.idx=String(idx);
+        d.innerHTML = '<div class=\"lbl\">校章 #'+(idx+1)+'</div><button class=\"del\" title=\"删除\">×</button>';
+        d.querySelector('.del').addEventListener('click',(e)=>{ e.stopPropagation(); stampPositions.splice(idx,1); setCount(); renderStamps(); });
+
+        let dragging=false, sx0=0, sy0=0, l0=0, t0=0;
+        const mm=(e)=>{ if(!dragging) return; e.preventDefault(); d.style.left=(l0+(e.clientX-sx0))+'px'; d.style.top=(t0+(e.clientY-sy0))+'px'; };
+        const mu=(e)=>{ if(!dragging) return; dragging=false; document.removeEventListener('mousemove',mm); document.removeEventListener('mouseup',mu);
+          const wrap=document.getElementById('pdfWrap'); const sl=wrap.scrollLeft||0, st=wrap.scrollTop||0;
+          const l=parseFloat(d.style.left)||0, t=parseFloat(d.style.top)||0;
+          const pdf=screenToPdf(l+sl, t+st);
+          stampPositions[idx].x = pdf.x; stampPositions[idx].y = pdf.y;
+        };
+        d.addEventListener('mousedown',(e)=>{ if(e.target.classList.contains('del')) return; dragging=true; sx0=e.clientX; sy0=e.clientY; l0=parseFloat(d.style.left)||0; t0=parseFloat(d.style.top)||0; e.preventDefault(); e.stopPropagation(); document.addEventListener('mousemove',mm,{passive:false}); document.addEventListener('mouseup',mu,{passive:false}); });
+        o.appendChild(d);
+      });
+    }
+
+    async function renderPdf(file){
+      const buf = await file.arrayBuffer();
+      pdfDoc = await pdfjsLib.getDocument({data: buf}).promise;
+      page = await pdfDoc.getPage(1);
+      const vp0 = page.getViewport({scale: 1.0});
+      pdfW = vp0.width; pdfH = vp0.height;
+      const wrap = document.getElementById('pdfWrap');
+      const scale = (wrap.clientWidth-20) / pdfW;
+      const vp = page.getViewport({scale});
+      const c=document.getElementById('pdfCanvas');
+      c.width = vp.width; c.height = vp.height;
+      await page.render({canvasContext: c.getContext('2d'), viewport: vp}).promise;
+      calcScale();
+      renderStamps();
+    }
+
+    document.getElementById('pdfFile').addEventListener('change', async (e)=>{
+      const f = e.target.files && e.target.files[0];
+      if(!f) return;
+      if(f.type!=='application/pdf' && !String(f.name).toLowerCase().endsWith('.pdf')){ setStatus('请上传 PDF 文件','err'); return; }
+      fileObj = f;
+      stampPositions.splice(0, stampPositions.length);
+      setCount();
+      try { await renderPdf(f); setStatus('PDF 已加载，请点击选点。','ok'); document.getElementById('enqueueBtn').disabled=false; }
+      catch(err){ console.error(err); setStatus('PDF 加载失败：'+(err.message||err),'err'); }
+    });
+
+    document.getElementById('overlay').addEventListener('click', (e)=>{
+      if(!pdfDoc) return;
+      if(e.target.closest('.stamp')) return;
+      const c=document.getElementById('pdfCanvas');
+      const r=c.getBoundingClientRect();
+      const wrap=document.getElementById('pdfWrap'); const sl=wrap.scrollLeft||0, st=wrap.scrollTop||0;
+      const sx = (e.clientX - r.left) + sl;
+      const sy = (e.clientY - r.top) + st;
+      const pdf = screenToPdf(sx, sy);
+      stampPositions.push({x: pdf.x, y: pdf.y});
+      setCount();
+      renderStamps();
+    });
+
+    document.getElementById('enqueueBtn').addEventListener('click', async ()=>{
+      if(!loggedIn){
+        window.location.href = "/auth/dingtalk/login?next=%2Fseal.html";
+        return;
+      }
+      if(!fileObj) return setStatus('请先上传 PDF','err');
+      if(stampPositions.length===0) return setStatus('请至少选择 1 个盖章位置','err');
+      const remark = (document.getElementById('remark').value||'').trim();
+      const fd = new FormData();
+      fd.append('pdf', fileObj);
+      fd.append('positions', JSON.stringify(stampPositions));
+      fd.append('remark', remark);
+      const btn=document.getElementById('enqueueBtn'); btn.disabled=true;
+      setStatus('提交中…','muted');
+      try{
+        const r = await fetch(API_SEAL, { method:'POST', body: fd });
+        const d = await r.json().catch(()=>({}));
+        if (r.status === 401 && d && d.need_login) {
+          window.location.href = "/auth/dingtalk/login?next=%2Fseal.html";
+          return;
+        }
+        if(!r.ok || !d.ok) { setStatus('提交失败：'+(d.msg||d.detail||r.status),'err'); return; }
+        setStatus('已入队，ID='+d.id+'（等待管理员审核）','ok');
+      }catch(err){
+        setStatus('请求失败：'+(err.message||err),'err');
+      }finally{
+        btn.disabled=false;
+      }
+    });
+
+    loadMe();
+  </script>
+</body>
+</html>
+

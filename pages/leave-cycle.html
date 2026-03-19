@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>周期请假 - 管理中心</title>
+    <link rel="stylesheet" href="/css/bootstrap.min.css" />
+    <link rel="stylesheet" href="/css/common.css" />
+    <link rel="stylesheet" href="/css/bootstrap-icons.css" />
+    <style>
+        .form-card {
+            background-color: var(--bg-white);
+            border-radius: 10px;
+            padding: 1.5rem;
+            border: 1px solid var(--border-color);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+            max-width: 720px;
+        }
+        .form-label { color: var(--text-secondary); font-weight: 500; margin-bottom: 0.35rem; }
+        .btn-primary-custom {
+            background-color: var(--primary-blue);
+            color: white;
+            border: none;
+            padding: 0.5rem 1.25rem;
+            border-radius: 6px;
+            font-weight: 500;
+            transition: all 0.2s ease;
+        }
+        .btn-primary-custom:hover { background-color: var(--primary-blue-dark); color: white; }
+        .btn-primary-custom:disabled { opacity: 0.65; cursor: not-allowed; }
+        #statusMsg { min-height: 1.5rem; font-size: 0.875rem; margin-top: 0.75rem; white-space: pre-wrap; }
+        #statusMsg.ok { color: var(--success-color); }
+        #statusMsg.err { color: var(--danger-color); }
+        .hint { font-size: 12px; color: var(--text-muted); }
+        .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+        .result-card {
+            margin-top: 1rem;
+            background: var(--bg-white);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 1rem;
+        }
+        .result-title { font-weight: 600; margin-bottom: 0.5rem; }
+        .chat-card{margin-bottom:1rem;background:var(--bg-white);border:1px solid var(--border-color);border-radius:10px;padding:1rem}
+        .chat-row{display:flex;gap:.75rem;flex-wrap:wrap;align-items:flex-start}
+        .chat-row textarea{flex:1;min-width:280px}
+        .chat-actions{display:flex;gap:.5rem;flex-wrap:wrap}
+        .chat-out{margin-top:.5rem;font-size:12px;color:var(--text-secondary);white-space:pre-wrap}
+    </style>
+</head>
+<body>
+<div class="main-container">
+    <header>
+        <h1><i class="bi bi-calendar2-check"></i> 教师周期请假（快捷）</h1>
+        <p class="text-secondary mb-0">一次提交多人：按姓名查学号(user_id)→调用平台“周期请假申请”</p>
+    </header>
+
+    <div class="chat-card">
+        <div class="form-label"><i class="bi bi-chat-dots"></i> LLM 解析（把口述内容转成表单）</div>
+        <div class="chat-row">
+            <textarea class="form-control" id="llmInput" rows="3" placeholder="例如：周三晚三，邵开达、陈耀曦请假；黄睿哲周三下午第三节参加比赛"></textarea>
+            <div class="chat-actions">
+                <button type="button" class="btn btn-primary-custom" id="llmParseBtn"><i class="bi bi-magic"></i> 解析并回填</button>
+                <button type="button" class="btn btn-outline-custom" id="llmFillWeekBtn"><i class="bi bi-calendar-week"></i> 仅填本周</button>
+            </div>
+        </div>
+        <div class="chat-out" id="llmOutput"></div>
+    </div>
+
+    <div class="form-card">
+        <div class="row g-3">
+            <div class="col-md-3">
+                <label class="form-label" for="grade">关联年级（grade）</label>
+                <input type="number" class="form-control" id="grade" value="1" min="1" />
+                <div class="hint">与 URL 中 /grade/1 一致</div>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label" for="week">星期</label>
+                <select class="form-control form-select" id="week">
+                    <option value="1">周一</option>
+                    <option value="2">周二</option>
+                    <option value="3" selected>周三</option>
+                    <option value="4">周四</option>
+                    <option value="5">周五</option>
+                    <option value="6">周六</option>
+                    <option value="7">周日</option>
+                </select>
+                <div class="hint">与平台表单一致</div>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label" for="timestart">开始时间</label>
+                <input type="time" class="form-control" id="timestart" value="15:15" />
+                <div class="hint">默认按温科高作息：下午第三节=第八节 15:15</div>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label" for="timeend">结束时间</label>
+                <input type="time" class="form-control" id="timeend" value="15:55" />
+                <div class="hint">第八节结束 15:55；晚三 20:50–21:40</div>
+            </div>
+
+            <div class="col-md-3">
+                <label class="form-label" for="timeStart">周期开始日期</label>
+                <input type="date" class="form-control" id="timeStart" />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label" for="timeEnd">周期结束日期</label>
+                <input type="date" class="form-control" id="timeEnd" />
+            </div>
+            <div class="col-md-6">
+                <label class="form-label" for="reason">原因（自由文本）</label>
+                <input type="text" class="form-control" id="reason" value="特殊科创社团活动" maxlength="50" />
+                <div class="hint">平台没有“事假/病假”下拉，这里就是那一行文字</div>
+            </div>
+
+            <div class="col-12">
+                <label class="form-label" for="students">学生姓名（逗号或换行分隔）</label>
+                <textarea class="form-control" id="students" rows="4" placeholder="例如：&#10;邵开达&#10;陈耀曦&#10;黄睿哲"></textarea>
+                <div class="hint">姓名必须与平台一致（如“曦/羲”易写错）</div>
+            </div>
+
+            <div class="col-md-6">
+                <label class="form-label">周期请假方式（cycle_replace）</label>
+                <div class="d-flex gap-3">
+                    <label class="form-check-label"><input class="form-check-input" type="radio" name="cycleReplace" value="0" checked /> 常规周期</label>
+                    <label class="form-check-label"><input class="form-check-input" type="radio" name="cycleReplace" value="1" /> 临时替换</label>
+                    <label class="form-check-label"><input class="form-check-input" type="radio" name="cycleReplace" value="2" /> 违纪暂停</label>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <label class="form-label" for="vercode">验证码（若提示需要）</label>
+                <input type="text" class="form-control" id="vercode" placeholder="仅当接口提示 need_captcha 时填写" />
+                <div class="hint">如启用登录验证码，需要人工看登录页验证码后填入</div>
+            </div>
+        </div>
+
+        <div class="mt-3">
+            <button type="button" class="btn btn-primary-custom" id="submitBtn">
+                <i class="bi bi-send-check"></i> 提交请假
+            </button>
+            <div id="statusMsg"></div>
+        </div>
+
+        <div class="result-card" id="resultCard" style="display:none;">
+            <div class="result-title">本次解析结果</div>
+            <div class="hint">以“周期请假查询”里显示为准；后台可能按班级拆分记录。</div>
+            <div class="mono" id="resultText"></div>
+        </div>
+    </div>
+</div>
+
+    <script src="/js/leave-cycle.js"></script>
+</body>
+</html>
+
