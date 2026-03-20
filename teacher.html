@@ -72,7 +72,7 @@
       <div class="d-flex align-items-start flex-wrap gap-3">
         <!-- 管理员入口：卡片最左侧独立一列 -->
         <div class="admin-entry-col">
-          <a class="btn btn-outline-secondary btn-sm" href="/index.html" target="_blank" rel="noopener" title="管理中心"><i class="bi bi-person-badge"></i> 管理员入口</a>
+          <button type="button" class="btn btn-outline-secondary btn-sm" id="goAdminTabBtn" title="管理中心"><i class="bi bi-person-badge"></i> 管理中心</button>
         </div>
         <div class="flex-grow-1" style="min-width: 200px;">
           <div class="h5 mb-1"><i class="bi bi-chat-square-text"></i> 教师申请</div>
@@ -92,6 +92,7 @@
   <div class="tab-bar" id="teacherTabBar" role="tablist">
     <button type="button" class="tab-btn active" id="tabQuick" data-panel="panelQuick" role="tab" aria-selected="true"><i class="bi bi-lightning-charge"></i> 快速申请</button>
     <button type="button" class="tab-btn" id="tabSeal" data-panel="panelSeal" role="tab" aria-selected="false"><i class="bi bi-patch-check"></i> 校章申请</button>
+    <button type="button" class="tab-btn" id="tabAdmin" data-panel="panelAdmin" role="tab" aria-selected="false"><i class="bi bi-speedometer2"></i> 管理中心</button>
   </div>
 
   <div class="teacher-panel-wrap">
@@ -109,7 +110,12 @@
 
     <div class="teacher-panel" id="panelSeal" role="tabpanel" aria-labelledby="tabSeal">
       <iframe id="sealFrame" class="teacher-seal-frame" src="" title="校章申请" frameborder="0"></iframe>
-      <div class="muted small mt-2">提示：校章申请在上方区域内完成；也可<a href="/seal.html" target="_blank" rel="noopener">新窗口打开完整页</a>。</div>
+      <div class="muted small mt-2">提示：校章申请在本页内完成，无需跳转外部浏览器。</div>
+    </div>
+
+    <div class="teacher-panel" id="panelAdmin" role="tabpanel" aria-labelledby="tabAdmin">
+      <iframe id="adminFrame" class="teacher-seal-frame" src="" title="管理中心" frameborder="0"></iframe>
+      <div class="muted small mt-2">提示：管理功能已内嵌在本页标签中。</div>
     </div>
   </div>
 
@@ -146,6 +152,8 @@
     const modal = new bootstrap.Modal(modalEl);
     let lastParsed = null;
     let sealFrameLoaded = false;
+    let adminFrameLoaded = false;
+    let parseTickTimer = null;
 
     function setStatus(text, type) {
       const el = document.getElementById("status");
@@ -158,8 +166,10 @@
       const panels = {
         panelQuick: document.getElementById("panelQuick"),
         panelSeal: document.getElementById("panelSeal"),
+        panelAdmin: document.getElementById("panelAdmin"),
       };
       const sealFrame = document.getElementById("sealFrame");
+      const adminFrame = document.getElementById("adminFrame");
 
       tabs.forEach(function (btn) {
         btn.addEventListener("click", function () {
@@ -180,8 +190,20 @@
             sealFrame.src = "/seal.html?embed=1";
             sealFrameLoaded = true;
           }
+          if (pid === "panelAdmin" && !adminFrameLoaded) {
+            adminFrame.src = "/index.html";
+            adminFrameLoaded = true;
+          }
         });
       });
+
+      const goAdminBtn = document.getElementById("goAdminTabBtn");
+      const adminTabBtn = document.getElementById("tabAdmin");
+      if (goAdminBtn && adminTabBtn) {
+        goAdminBtn.addEventListener("click", function () {
+          adminTabBtn.click();
+        });
+      }
     }
 
     async function loadMe() {
@@ -208,10 +230,26 @@
     async function parseNlp() {
       const t = (document.getElementById("nlpText").value || "").trim();
       if (!t) return setStatus("请输入一句话。", "err");
-      document.getElementById("parseBtn").disabled = true;
-      setStatus("解析中…", "muted");
+      const parseBtn = document.getElementById("parseBtn");
+      parseBtn.disabled = true;
+      parseBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span> 解析中';
+      let sec = 0;
+      setStatus("解析中，请稍候…（0s）", "muted");
+      clearInterval(parseTickTimer);
+      parseTickTimer = setInterval(function () {
+        sec += 1;
+        setStatus("解析中，请稍候…（" + sec + "s）", "muted");
+      }, 1000);
       try {
-        const r = await fetch(API_PARSE, { method:"POST", headers:{ "content-type":"application/json" }, body: JSON.stringify({ text: t }) });
+        const controller = new AbortController();
+        const timeoutId = setTimeout(function () { controller.abort(); }, 90000);
+        const r = await fetch(API_PARSE, {
+          method:"POST",
+          headers:{ "content-type":"application/json" },
+          body: JSON.stringify({ text: t }),
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
         const d = await r.json().catch(()=>({}));
         if (!r.ok || !d.ok) { setStatus("解析失败：" + (d.msg || r.status), "err"); return; }
         lastParsed = d.data;
@@ -219,9 +257,16 @@
         setStatus("解析完成，请确认。", "ok");
         modal.show();
       } catch (e) {
-        setStatus("请求失败：" + e.message, "err");
+        if (e && e.name === "AbortError") {
+          setStatus("解析超时（>90s），请重试或缩短描述。", "err");
+        } else {
+          setStatus("请求失败：" + e.message, "err");
+        }
       } finally {
-        document.getElementById("parseBtn").disabled = false;
+        clearInterval(parseTickTimer);
+        parseTickTimer = null;
+        parseBtn.disabled = false;
+        parseBtn.innerHTML = '<i class="bi bi-magic"></i> 解析';
       }
     }
 

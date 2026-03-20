@@ -1688,4 +1688,5 @@ def api_schoolisover_token():
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8000, debug=True)
+    # 开发环境显式开启线程，避免单个慢请求阻塞其他接口
+    app.run(host='0.0.0.0', port=8000, debug=True, threaded=True)
