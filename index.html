@@ -168,16 +168,6 @@
                 initTabs();
             }
 
-            function tryLocalUnlock() {
-                try {
-                    if (window.localStorage && localStorage.getItem(STORAGE_KEY) === "1") {
-                        unlock();
-                        return true;
-                    }
-                } catch (e) {}
-                return false;
-            }
-
             fetch("/api/admin-gate-status")
                 .then(function (r) { return r.json(); })
                 .then(function (st) {
@@ -185,7 +175,11 @@
                         unlock();
                         return;
                     }
-                    if (tryLocalUnlock()) return;
+                    // 已启用口令：必须向后端校验成功以写入管理员会话（否则审核接口会 401）。
+                    // 不再用 localStorage 绕过，避免“界面解锁了但接口仍无权限”。
+                    try {
+                        if (window.localStorage) localStorage.removeItem(STORAGE_KEY);
+                    } catch (e) {}
 
                     gateBtn.addEventListener("click", function () {
                         var v = (gateInput.value || "").trim();

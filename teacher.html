@@ -214,6 +214,19 @@
       return (el.value || "").trim();
     }
 
+    /** 添加车牌：仅「临时」显示日期；切回长期时清空日期避免误提交 */
+    function syncAddVehicleDateVisibility() {
+      var row = document.getElementById("addVehicleDateRow");
+      var pt = document.getElementById("inp_plate_type");
+      if (!row || !pt) return;
+      var isTemp = String(pt.value) === "1";
+      row.style.display = isTemp ? "block" : "none";
+      if (!isTemp) {
+        setHumanValue("inp_start_date", "");
+        setHumanValue("inp_end_date", "");
+      }
+    }
+
     function renderHuman(parsed) {
       const wrap = document.getElementById("parseHuman");
       const preview = document.getElementById("parsePreview");
@@ -276,18 +289,28 @@
         html += "    <option value='0'>长期</option>";
         html += "    <option value='1'>临时</option>";
         html += "  </select></div>";
-        html += "  <div class='col-md-4'><label class='form-label small text-muted'>开始日期（临时）</label><input id='inp_start_date' type='date' class='form-control form-control-sm'/></div>";
-        html += "  <div class='col-md-4'><label class='form-label small text-muted'>结束日期（临时）</label><input id='inp_end_date' type='date' class='form-control form-control-sm'/></div>";
+        html += "  <div class='col-12' id='addVehicleDateRow' style='display:none;'>";
+        html += "    <div class='row g-2'>";
+        html += "      <div class='col-md-4'><label class='form-label small text-muted'>授权开始日期</label><input id='inp_start_date' type='date' class='form-control form-control-sm'/></div>";
+        html += "      <div class='col-md-4'><label class='form-label small text-muted'>授权结束日期</label><input id='inp_end_date' type='date' class='form-control form-control-sm'/></div>";
+        html += "    </div>";
+        html += "    <div class='form-text small text-muted mb-0'>仅临时车牌需填写起止日期。</div>";
+        html += "  </div>";
         html += "  <div class='col-md-8'><label class='form-label small text-muted'>备注（可空）</label><input id='inp_remark' class='form-control form-control-sm' placeholder='例如：用于XX证明' /></div>";
         html += "</div>";
         wrap.innerHTML = html;
 
         setHumanValue("inp_name", params.name || "");
         setHumanValue("inp_plate_no", params.plate_no || "");
-        setHumanValue("inp_plate_type", params.plate_type || "0");
+        setHumanValue("inp_plate_type", params.plate_type != null && params.plate_type !== "" ? String(params.plate_type) : "0");
         setHumanValue("inp_start_date", params.start_date || "");
         setHumanValue("inp_end_date", params.end_date || "");
         setHumanValue("inp_remark", params.remark || "");
+        var ptSel = document.getElementById("inp_plate_type");
+        if (ptSel) {
+          ptSel.addEventListener("change", syncAddVehicleDateVisibility);
+        }
+        syncAddVehicleDateVisibility();
         return;
       }
 
@@ -330,8 +353,13 @@
         params.name = getHumanValue("inp_name") || "";
         params.plate_no = getHumanValue("inp_plate_no") || "";
         params.plate_type = getHumanValue("inp_plate_type") || "0";
-        params.start_date = getHumanValue("inp_start_date") || "";
-        params.end_date = getHumanValue("inp_end_date") || "";
+        if (String(params.plate_type) === "1") {
+          params.start_date = getHumanValue("inp_start_date") || "";
+          params.end_date = getHumanValue("inp_end_date") || "";
+        } else {
+          params.start_date = "";
+          params.end_date = "";
+        }
         params.remark = getHumanValue("inp_remark") || "";
         return base;
       }
@@ -565,12 +593,17 @@
       const wrap = document.getElementById("myRequestsList");
       if (wrap) wrap.textContent = "加载中…";
       try {
-        const r = await fetch(API_MY_REQUESTS, { method: "GET" });
+        const r = await fetch(API_MY_REQUESTS, { method: "GET", credentials: "same-origin" });
         const d = await r.json().catch(()=>({}));
         if (r.status === 401 && d && d.need_login) {
           // 需要登录时不强制跳转，只触发一次免登
           setStatus("需要钉钉登录后才能查看入队结果。", "err");
           if (window.keDingTalkH5Login) window.keDingTalkH5Login();
+          return;
+        }
+        if (r.status === 403 && d && d.msg) {
+          if (wrap) wrap.textContent = d.msg;
+          setStatus(d.msg, "err");
           return;
         }
         if (!r.ok || !d.ok) {

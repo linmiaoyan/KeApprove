@@ -101,6 +101,54 @@ _init_queue_db()
 def _now_iso():
     return datetime.utcnow().isoformat() + 'Z'
 
+
+def _dingtalk_identity_bucket(d: dict) -> dict:
+    """从钉钉用户/快照中抽取用于「我的申请」比对的标识（任一匹配即视为同一人）。"""
+    if not isinstance(d, dict):
+        return {"user_id": "", "open_id": "", "union_id": ""}
+    uid = str(d.get("userId") or d.get("userid") or "").strip()
+    oid = str(d.get("openId") or d.get("open_id") or "").strip()
+    uni = str(d.get("unionId") or d.get("unionid") or "").strip()
+    return {"user_id": uid, "open_id": oid, "union_id": uni}
+
+
+def _same_dingtalk_identity(me: dict, requester: dict) -> bool:
+    a = _dingtalk_identity_bucket(me)
+    b = _dingtalk_identity_bucket(requester)
+    if a["user_id"] and b["user_id"] and a["user_id"] == b["user_id"]:
+        return True
+    if a["open_id"] and b["open_id"] and a["open_id"] == b["open_id"]:
+        return True
+    if a["union_id"] and b["union_id"] and a["union_id"] == b["union_id"]:
+        return True
+    return False
+
+
+def _me_has_dingtalk_identity(me: dict) -> bool:
+    b = _dingtalk_identity_bucket(me)
+    return bool(b["user_id"] or b["open_id"] or b["union_id"])
+
+
+def _admin_gate_expected() -> str:
+    return (_env_get("ADMIN_GATE_CODE", "") or "").strip()
+
+
+def _admin_api_authorized() -> bool:
+    """未配置 ADMIN_GATE_CODE 时保持兼容（与旧行为一致）；配置后须先通过口令校验写入 session。"""
+    exp = _admin_gate_expected()
+    if not exp:
+        return True
+    return bool(web_session.get("ke_admin_gate_ok"))
+
+
+def _admin_api_denied_response():
+    return jsonify({
+        "ok": False,
+        "need_admin_gate": True,
+        "msg": "需要先在「管理中心」父页面输入正确访问口令，或刷新后重新进入管理中心。",
+    }), 401
+
+
 def _row_to_req(row):
     try:
         params = json.loads(row["params_json"] or "{}")
@@ -354,8 +402,12 @@ def api_admin_gate_check():
     code = (data.get('code') or '').strip()
     expected = _env_get("ADMIN_GATE_CODE", "")
     if not expected:
+        web_session.pop("ke_admin_gate_ok", None)
         return jsonify({'ok': True, 'skip': True})
-    return jsonify({'ok': code == expected})
+    ok = code == expected
+    if ok:
+        web_session["ke_admin_gate_ok"] = True
+    return jsonify({'ok': ok})
 
 
 @app.route('/api/request-parse', methods=['POST'])
@@ -378,6 +430,20 @@ def api_request_parse():
         },
         "notes": ""
     }
+    leave_cycle_hint = {
+        "type": "leave_cycle",
+        "params": {
+            "students": ["黄睿哲"],
+            "weekday": 3,
+            "lesson_hint": "晚三",
+            "timestart": "20:50",
+            "timeend": "21:40",
+            "time_start": "2026-03-17",
+            "time_end": "2026-03-17",
+            "reason": ""
+        },
+        "notes": ""
+    }
     sys = (
         "你是学校信息化助手。任务：把教师的一句话需求解析成“申请类型 + 参数”，用于进入审批队列。\n"
         "只输出 JSON，不要额外文字。字段固定：\n"
@@ -387,9 +453,13 @@ def api_request_parse():
         "\n"
         "规则：\n"
         "1) 车牌：识别姓名、车牌号、长期/临时；若“开一年/半年/几个月”等 → plate_type=1 并推算 start_date/end_date（YYYY-MM-DD），否则 plate_type=0。\n"
-        "2) 周期请假：尽量给出 students、week、timestart、timeend、time_start、time_end、reason。\n"
+        "2) 周期请假：students 为学生姓名数组；weekday 为 1-7（周一=1…周日=7），文本含“今天/明天”等请换算成对应星期数字；"
+        "time_start、time_end 为请假日期范围 YYYY-MM-DD（“今天”请用当天日期，不要写汉字）；"
+        "timestart、timeend 必须为当天作息时段的 24小时制 HH:MM（例如晚三=20:50-21:40、下午第三节=15:15-15:55），"
+        "严禁把“今天/明天”等日期词填入 timestart/timeend；课节口语放入 lesson_hint（如 晚三、下午第2节）。\n"
         "3) 重置网络密码：识别 userName/userId 以及新密码。\n"
-        f"参考结构：{json.dumps(schema_hint, ensure_ascii=False)}"
+        f"参考结构（车牌）：{json.dumps(schema_hint, ensure_ascii=False)}\n"
+        f"参考结构（周期请假）：{json.dumps(leave_cycle_hint, ensure_ascii=False)}"
     )
     user = f"请解析：{text}"
     try:
@@ -405,7 +475,18 @@ def api_request_parse():
         params = parsed.get("params") or {}
         if not isinstance(params, dict):
             return jsonify({'ok': False, 'msg': 'params 必须是对象', 'raw': content}), 400
-        out = {"type": t, "params": params, "notes": str(parsed.get("notes") or "")}
+        notes = str(parsed.get("notes") or "")
+        if t == "leave_cycle":
+            params = _enrich_leave_cycle_params_from_original_text(text, params)
+            bits = [notes] if notes else []
+            if params.get("timestart") and params.get("timeend"):
+                bits.append(
+                    f"时段已按温科高作息表校对为 {params['timestart']}–{params['timeend']}（可在表单中修改）。"
+                )
+            elif re.search(r"晚|自修|自习|第\s*[一二三四五六七八九十\d]\s*节|下午|上午|早读", text):
+                bits.append("未能根据原文自动匹配到标准作息时段，请手工填写开始/结束时刻（HH:MM）。")
+            notes = " ".join(x for x in bits if x).strip()
+        out = {"type": t, "params": params, "notes": notes}
         return jsonify({'ok': True, 'data': out, 'raw': content})
     except Exception as e:
         return jsonify({'ok': False, 'msg': str(e)}), 500
@@ -505,6 +586,8 @@ def api_seal_request():
 
 @app.route('/api/admin/requests', methods=['GET'])
 def api_admin_list_requests():
+    if not _admin_api_authorized():
+        return _admin_api_denied_response()
     status = (request.args.get('status') or '').strip()
     conn = _db()
     try:
@@ -526,9 +609,11 @@ def api_my_requests():
     me = web_session.get("dt_user")
     if not me:
         return jsonify({'ok': False, 'need_login': True, 'msg': 'need_dingtalk_login'}), 401
-
-    uid = str(me.get("userId") or me.get("userid") or "").strip()
-    oid = str(me.get("openId") or me.get("open_id") or "").strip()
+    if not _me_has_dingtalk_identity(me):
+        return jsonify({
+            'ok': False,
+            'msg': '当前登录信息缺少钉钉用户标识，无法筛选「我的申请」。请在钉钉内重新打开本页并完成登录。',
+        }), 403
 
     conn = _db()
     try:
@@ -544,11 +629,8 @@ def api_my_requests():
             requester = None
         if not isinstance(requester, dict):
             continue
-        r_uid = str(requester.get("userId") or requester.get("userid") or "").strip()
-        r_oid = str(requester.get("openId") or requester.get("open_id") or "").strip()
-        if uid and r_uid and uid == r_uid:
-            out.append(_row_to_req(row))
-        elif oid and r_oid and oid == r_oid:
+        # 仅返回与当前登录者为同一钉钉身份的记录（userId / openId / unionId 任一一致）
+        if _same_dingtalk_identity(me, requester):
             out.append(_row_to_req(row))
 
     return jsonify({'ok': True, 'data': out})
@@ -556,6 +638,8 @@ def api_my_requests():
 
 @app.route('/api/admin/requests/<int:rid>', methods=['GET'])
 def api_admin_get_request(rid: int):
+    if not _admin_api_authorized():
+        return _admin_api_denied_response()
     conn = _db()
     try:
         row = conn.execute("SELECT * FROM requests WHERE id=?", (rid,)).fetchone()
@@ -568,6 +652,8 @@ def api_admin_get_request(rid: int):
 
 @app.route('/api/admin/requests/<int:rid>/review', methods=['POST'])
 def api_admin_review_request(rid: int):
+    if not _admin_api_authorized():
+        return _admin_api_denied_response()
     data = request.get_json(force=True, silent=True) or {}
     st = str(data.get('status') or '').strip()
     comment = str(data.get('comment') or '').strip()
@@ -854,6 +940,7 @@ def auth_logout():
     web_session.pop("dt_user", None)
     web_session.pop("dt_oauth_state", None)
     web_session.pop("dt_next", None)
+    web_session.pop("ke_admin_gate_ok", None)
     return redirect("/teacher.html")
 
 
@@ -1000,6 +1087,134 @@ def _leave_nlp_apply_wzkgz_timetable(parsed: dict, original_text: str):
     extra = f"课节时间已按温科高2025学年第一学期作息表校对：{label} → {ts}-{te}。"
     parsed["notes"] = (note + " " + extra).strip() if note else extra
     return parsed
+
+
+def _infer_leave_weekday_from_text(text: str):
+    """从自然语言中推断 weekday 1-7（周一=1…周日=7），无法可靠推断时返回 None。"""
+    from datetime import date, timedelta
+    if not text:
+        return None
+    t = str(text).replace(" ", "").replace("　", "")
+    today = date.today()
+    if re.search(r"今天|当日|今晚", t):
+        return today.weekday() + 1
+    if re.search(r"明天", t):
+        return (today + timedelta(days=1)).weekday() + 1
+    if re.search(r"后天", t):
+        return (today + timedelta(days=2)).weekday() + 1
+    if re.search(r"昨天|昨日", t):
+        return (today + timedelta(days=-1)).weekday() + 1
+    for k, v in [
+        ("周一", 1), ("周二", 2), ("周三", 3), ("周四", 4), ("周五", 5), ("周六", 6), ("周日", 7), ("周天", 7), ("星期日", 7),
+    ]:
+        if k in t:
+            return v
+    m = re.search(r"星期([一二三四五六日天])", t)
+    if m:
+        mp = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "日": 7, "天": 7}
+        return mp.get(m.group(1))
+    return None
+
+
+def _leave_params_resolve_dates_from_text(text: str, params: dict) -> None:
+    """根据「今天/明天」等为周期请假填充 time_start/time_end（YYYY-MM-DD），原地修改 params。"""
+    from datetime import date, timedelta
+    if not text or not isinstance(params, dict):
+        return
+    t = str(text).replace(" ", "").replace("　", "")
+    today = date.today()
+    d0 = None
+    if re.search(r"今天|当日", t):
+        d0 = today
+    elif re.search(r"明天", t):
+        d0 = today + timedelta(days=1)
+    elif re.search(r"后天", t):
+        d0 = today + timedelta(days=2)
+    elif re.search(r"昨天|昨日", t):
+        d0 = today + timedelta(days=-1)
+    if d0 is None:
+        return
+    iso = d0.isoformat()
+    vague = {"", "今天", "明天", "后天", "昨日", "昨天", "当日", "本周", "这周", "下周"}
+    ts = str(params.get("time_start") or params.get("timeStart") or "").strip()
+    te = str(params.get("time_end") or params.get("timeEnd") or "").strip()
+    if not ts or ts in vague:
+        params["time_start"] = iso
+    if not te or te in vague:
+        params["time_end"] = iso
+
+
+def _enrich_leave_cycle_params_from_original_text(original_text: str, params: dict) -> dict:
+    """
+    快速申请 /api/request-parse 入队用的周期请假参数：用原文 + 本校作息表补全 timestart/timeend，
+    避免模型把「今天」等日期词误填入作息时段字段。
+    """
+    if not isinstance(params, dict):
+        return params
+    text = (original_text or "").strip()
+    params = dict(params)
+
+    stu = params.get("students")
+    if isinstance(stu, str) and stu.strip():
+        params["students"] = [x.strip() for x in re.split(r"[;；,，\s\n]+", stu) if x.strip()]
+
+    wd = None
+    wd_llm = params.get("weekday")
+    if wd_llm is None:
+        wd_llm = params.get("week")
+    try:
+        if wd_llm is not None and str(wd_llm).strip().isdigit():
+            n = int(str(wd_llm).strip())
+            if 1 <= n <= 7:
+                wd = n
+    except (TypeError, ValueError):
+        wd = None
+    if wd is None:
+        wd = _infer_leave_weekday_from_text(text)
+    if wd is not None:
+        params["weekday"] = wd
+
+    vague_te = re.compile(r"^(今天|明天|后天|昨日|昨天|当日|本周|这周|下周)$")
+
+    blob_parts = [text]
+    for k in ("timestart", "timeend", "lesson_hint", "reason", "notes"):
+        v = params.get(k)
+        if v:
+            blob_parts.append(str(v))
+    t_obj = params.get("time")
+    if isinstance(t_obj, dict):
+        blob_parts.append(str(t_obj.get("timestart") or ""))
+        blob_parts.append(str(t_obj.get("timeend") or ""))
+    blob = " ".join(blob_parts)
+    lesson_hint = str(params.get("lesson_hint") or "")
+
+    hit = _wzkgz_2025s1_resolve_leave_times(wd, blob, lesson_hint)
+    if hit:
+        ts, te, label = hit
+        params["timestart"] = ts
+        params["timeend"] = te
+        if not str(params.get("lesson_hint") or "").strip():
+            params["lesson_hint"] = label
+
+    t_obj2 = params.get("time")
+    if isinstance(t_obj2, dict):
+        for fld in ("timestart", "timeend"):
+            cur = str(params.get(fld) or "").strip()
+            tv = str(t_obj2.get(fld) or "").strip()
+            if tv and ":" in tv and (not cur or bool(vague_te.match(cur))):
+                params[fld] = tv
+
+    _leave_params_resolve_dates_from_text(text, params)
+
+    for key in ("timestart", "timeend"):
+        v = str(params.get(key) or "").strip()
+        if vague_te.match(v):
+            params.pop(key, None)
+
+    if isinstance(params.get("time"), dict):
+        params.pop("time", None)
+
+    return params
 
 
 @app.route('/api/leave-nlp', methods=['POST'])
