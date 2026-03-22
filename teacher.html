@@ -111,6 +111,21 @@
     </div>
   </div>
 
+  <div class="cardx mt-3" id="myRequestsCard">
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <div>
+        <b>入队结果（显示在本页面下方）</b>
+        <div class="muted small mt-1">
+          说明：本系统对“智校云联”侧内容做二次处理。若需撤销或修改申请，请到 <b>智校云联</b> 后台自行撤销/修改；本页面不提供撤销/修改入口。
+        </div>
+      </div>
+      <button type="button" class="btn btn-outline-secondary btn-sm" id="refreshMyReqBtn">
+        <i class="bi bi-arrow-clockwise"></i> 刷新
+      </button>
+    </div>
+    <div class="mt-3" id="myRequestsList">尚未入队任何申请。</div>
+  </div>
+
   <!-- Parse Modal -->
   <div class="modal fade" id="parseModal" tabindex="-1">
     <div class="modal-dialog modal-lg modal-dialog-scrollable">
@@ -120,10 +135,18 @@
           <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
         </div>
         <div class="modal-body">
-          <div class="alert alert-info py-2 small">
-            请确认以下信息无误。若有不对，可以直接修改 JSON（仅改动 <span class="mono">params</span> 部分也可以）。
+          <div class="alert alert-info py-2 small" id="parseAlert">
+            请确认以下信息无误。可以直接在表单中修改关键字段，再点击“入队（提交申请）”。
           </div>
-          <pre class="mono mb-0" id="parsePreview"></pre>
+          <div id="parseHuman" class="mb-2"></div>
+          <!-- 仅用于查看/复制，入队时不再直接依赖文本框内容 -->
+          <pre class="mono mb-0" id="parsePreview" style="display:none;"></pre>
+          <div class="small text-muted mt-2 d-flex gap-2 flex-wrap align-items-center">
+            <button type="button" class="btn btn-outline-secondary btn-sm" id="copyParseBtn">
+              <i class="bi bi-files"></i> 复制JSON
+            </button>
+            <span>（用于排查/人工复核）</span>
+          </div>
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
@@ -139,6 +162,7 @@
     const API_PARSE = "/api/request-parse";
     const API_CREATE = "/api/requests";
     const API_ME = "/api/me";
+    const API_MY_REQUESTS = "/api/my-requests";
 
     const modalEl = document.getElementById("parseModal");
     let modal = null;
@@ -168,6 +192,158 @@
     let sealFrameLoaded = false;
     let adminFrameLoaded = false;
     let parseTickTimer = null;
+
+    function escHtml(s) {
+      return String(s == null ? "" : s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function setHumanValue(inputId, value) {
+      const el = document.getElementById(inputId);
+      if (!el) return;
+      el.value = value == null ? "" : String(value);
+    }
+
+    function getHumanValue(inputId) {
+      const el = document.getElementById(inputId);
+      if (!el) return "";
+      return (el.value || "").trim();
+    }
+
+    function renderHuman(parsed) {
+      const wrap = document.getElementById("parseHuman");
+      const preview = document.getElementById("parsePreview");
+      if (!wrap) return;
+      if (!parsed || typeof parsed !== "object") {
+        wrap.innerHTML = "<div class='muted'>未解析到有效数据</div>";
+        if (preview) preview.textContent = "";
+        return;
+      }
+
+      // 先保留一份 JSON 给“复制/人工排查”
+      const jsonStr = JSON.stringify(parsed, null, 2);
+      if (preview) preview.textContent = jsonStr;
+
+      const type = (parsed.type || "").toString();
+      const params = parsed.params || {};
+      const notes = parsed.notes || "";
+
+      let title = type;
+      if (type === "add_vehicle") title = "添加车牌";
+      if (type === "leave_cycle") title = "周期请假";
+      if (type === "reset_net_password") title = "重置网络密码";
+      if (type === "seal") title = "校章申请（如需请走校章申请标签页）";
+
+      let html = "";
+      html += "<div class='d-flex align-items-start justify-content-between flex-wrap gap-2'>";
+      html += "  <div><b>申请类型：</b><span class='text-primary'>" + escHtml(title) + "</span></div>";
+      if (notes) {
+        html += "  <div class='muted'><b>备注/不确定：</b>" + escHtml(notes) + "</div>";
+      }
+      html += "</div>";
+
+      // 根据 type 渲染不同表单
+      if (type === "leave_cycle") {
+        html += "<hr class='my-2'/>";
+        html += "<div class='row g-2'>";
+        html += "  <div class='col-md-6'><label class='form-label small text-muted'>学生</label><input id='inp_students' class='form-control form-control-sm' placeholder='例如：张三；李四' /></div>";
+        html += "  <div class='col-md-3'><label class='form-label small text-muted'>周</label><input id='inp_week' class='form-control form-control-sm' placeholder='例如：1-7或周三' /></div>";
+        html += "  <div class='col-md-3'><label class='form-label small text-muted'>原因</label><input id='inp_reason' class='form-control form-control-sm' placeholder='可空' /></div>";
+        html += "  <div class='col-md-6'><label class='form-label small text-muted'>开始时间（作息时段）</label><input id='inp_timestart' class='form-control form-control-sm' placeholder='例如：下午第1节' /></div>";
+        html += "  <div class='col-md-6'><label class='form-label small text-muted'>结束时间（作息时段）</label><input id='inp_timeend' class='form-control form-control-sm' placeholder='例如：下午第3节' /></div>";
+        html += "</div>";
+        wrap.innerHTML = html;
+
+        // 表单回填
+        setHumanValue("inp_students", (params.students || []).join("；"));
+        setHumanValue("inp_week", params.week || "");
+        setHumanValue("inp_reason", params.reason || "");
+        setHumanValue("inp_timestart", params.timestart || "");
+        setHumanValue("inp_timeend", params.timeend || "");
+        return;
+      }
+
+      if (type === "add_vehicle") {
+        html += "<hr class='my-2'/>";
+        html += "<div class='row g-2'>";
+        html += "  <div class='col-md-4'><label class='form-label small text-muted'>姓名</label><input id='inp_name' class='form-control form-control-sm' /></div>";
+        html += "  <div class='col-md-4'><label class='form-label small text-muted'>车牌号</label><input id='inp_plate_no' class='form-control form-control-sm' placeholder='例如：浙CDJ9405' /></div>";
+        html += "  <div class='col-md-4'><label class='form-label small text-muted'>车牌类型</label><select id='inp_plate_type' class='form-select form-select-sm'>";
+        html += "    <option value='0'>长期</option>";
+        html += "    <option value='1'>临时</option>";
+        html += "  </select></div>";
+        html += "  <div class='col-md-4'><label class='form-label small text-muted'>开始日期（临时）</label><input id='inp_start_date' type='date' class='form-control form-control-sm'/></div>";
+        html += "  <div class='col-md-4'><label class='form-label small text-muted'>结束日期（临时）</label><input id='inp_end_date' type='date' class='form-control form-control-sm'/></div>";
+        html += "  <div class='col-md-8'><label class='form-label small text-muted'>备注（可空）</label><input id='inp_remark' class='form-control form-control-sm' placeholder='例如：用于XX证明' /></div>";
+        html += "</div>";
+        wrap.innerHTML = html;
+
+        setHumanValue("inp_name", params.name || "");
+        setHumanValue("inp_plate_no", params.plate_no || "");
+        setHumanValue("inp_plate_type", params.plate_type || "0");
+        setHumanValue("inp_start_date", params.start_date || "");
+        setHumanValue("inp_end_date", params.end_date || "");
+        setHumanValue("inp_remark", params.remark || "");
+        return;
+      }
+
+      if (type === "reset_net_password") {
+        html += "<hr class='my-2'/>";
+        html += "<div class='row g-2'>";
+        html += "  <div class='col-md-6'><label class='form-label small text-muted'>用户ID/用户名</label><input id='inp_user' class='form-control form-control-sm' /></div>";
+        html += "  <div class='col-md-6'><label class='form-label small text-muted'>新密码</label><input id='inp_password' type='text' class='form-control form-control-sm' /></div>";
+        html += "</div>";
+        wrap.innerHTML = html;
+        setHumanValue("inp_user", params.userId || params.user_name || params.userName || params.user || "");
+        setHumanValue("inp_password", params.password || "");
+        return;
+      }
+
+      // 兜底：未知类型仍显示 JSON
+      html += "<pre class='mono mb-0'>" + escHtml(jsonStr) + "</pre>";
+      wrap.innerHTML = html;
+    }
+
+    function getHumanParsed() {
+      if (!lastParsed) return null;
+      const type = (lastParsed.type || "").toString();
+      const notes = lastParsed.notes || "";
+      const base = { type: type, params: {}, notes: notes };
+      const params = base.params;
+
+      if (type === "leave_cycle") {
+        params.students = (getHumanValue("inp_students") || "")
+          .split(/[；,，\n]+/).map(function (x) { return x.trim(); }).filter(Boolean);
+        // 兼容：有些字段名可能由模型输出为 timestart/timeend/weekday/week
+        params.week = getHumanValue("inp_week") || lastParsed.params.week || "";
+        params.reason = getHumanValue("inp_reason") || lastParsed.params.reason || "";
+        params.timestart = getHumanValue("inp_timestart") || lastParsed.params.timestart || "";
+        params.timeend = getHumanValue("inp_timeend") || lastParsed.params.timeend || "";
+        return base;
+      }
+
+      if (type === "add_vehicle") {
+        params.name = getHumanValue("inp_name") || "";
+        params.plate_no = getHumanValue("inp_plate_no") || "";
+        params.plate_type = getHumanValue("inp_plate_type") || "0";
+        params.start_date = getHumanValue("inp_start_date") || "";
+        params.end_date = getHumanValue("inp_end_date") || "";
+        params.remark = getHumanValue("inp_remark") || "";
+        return base;
+      }
+
+      if (type === "reset_net_password") {
+        params.userId = getHumanValue("inp_user") || "";
+        params.password = getHumanValue("inp_password") || "";
+        return base;
+      }
+
+      return lastParsed;
+    }
 
     function setStatus(text, type) {
       const el = document.getElementById("status");
@@ -260,7 +436,7 @@
         const d = await r.json().catch(()=>({}));
         if (!r.ok || !d.ok) { setStatus("解析失败：" + (d.msg || r.status), "err"); return; }
         lastParsed = d.data;
-        document.getElementById("parsePreview").textContent = JSON.stringify(lastParsed, null, 2);
+        renderHuman(lastParsed);
         setStatus("解析完成，请确认。", "ok");
         modal.show();
       } catch (e) {
@@ -279,9 +455,8 @@
 
     async function enqueue() {
       if (!lastParsed) return;
-      const raw = document.getElementById("parsePreview").textContent || "";
-      let obj = null;
-      try { obj = JSON.parse(raw); } catch (e) { setStatus("JSON 格式错误：" + e.message, "err"); return; }
+      const obj = getHumanParsed();
+      if (!obj) { setStatus("解析数据为空。", "err"); return; }
       document.getElementById("enqueueBtn").disabled = true;
       try {
         const r = await fetch(API_CREATE, { method:"POST", headers:{ "content-type":"application/json" }, body: JSON.stringify(obj) });
@@ -294,6 +469,8 @@
         if (!r.ok || !d.ok) { setStatus("入队失败：" + (d.msg || r.status), "err"); return; }
         modal.hide();
         setStatus("已入队，ID=" + d.id + "（等待管理员审核）", "ok");
+        // 入队后立刻刷新展示区域
+        loadMyRequests();
       } catch (e) {
         setStatus("请求失败：" + e.message, "err");
       } finally {
@@ -301,10 +478,148 @@
       }
     }
 
+    function typeLabel(type) {
+      if (type === "add_vehicle") return "添加车牌";
+      if (type === "leave_cycle") return "周期请假";
+      if (type === "reset_net_password") return "重置网络密码";
+      if (type === "seal") return "校章申请";
+      return type || "-";
+    }
+
+    function statusBadge(status) {
+      if (!status) return "<span class='text-muted'>-</span>";
+      const st = String(status);
+      if (st === "pending") return "<span class='badge text-bg-warning'>待审核</span>";
+      if (st === "approved") return "<span class='badge text-bg-success'>已通过</span>";
+      if (st === "rejected") return "<span class='badge text-bg-danger'>已驳回</span>";
+      return "<span class='badge text-bg-secondary'>" + escHtml(st) + "</span>";
+    }
+
+    function studentsLine(params) {
+      if (!params) return "";
+      var s = params.students;
+      if (Array.isArray(s)) return s.filter(Boolean).join("、");
+      return (s && String(s).trim()) || "";
+    }
+
+    function executionLine(item) {
+      var ex = item.execute_result;
+      if (!ex || typeof ex !== "object") return "";
+      var m = ex.message || "";
+      if (ex.skipped) return "执行说明：" + escHtml(m || "已跳过线上自动执行");
+      return (ex.ok ? "执行结果：成功 · " : "执行结果：未成功 · ") + escHtml(m || "");
+    }
+
+    function renderMyRequests(list) {
+      const wrap = document.getElementById("myRequestsList");
+      if (!wrap) return;
+      if (!Array.isArray(list) || list.length === 0) {
+        wrap.textContent = "尚未入队任何申请。";
+        return;
+      }
+
+      const html = list.map(function (item) {
+        const t = typeLabel(item.type);
+        const st = statusBadge(item.status);
+        const params = item.params || {};
+        let summary = "";
+        if (item.type === "add_vehicle") {
+          summary = (params.name ? (params.name + "，") : "") + (params.plate_no || "");
+          if (String(params.plate_type) === "1") summary += "（临时）";
+          else if (params.plate_type !== undefined) summary += "（长期）";
+        } else if (item.type === "leave_cycle") {
+          summary = studentsLine(params) || "（学生未填）";
+          if (params.reason) summary += " · " + params.reason;
+        } else if (item.type === "reset_net_password") {
+          summary = params.userId || params.user_id || params.userName || params.user_name || "（用户未填）";
+        } else if (item.type === "seal") {
+          summary = "校章：已上传 PDF 并标注位置";
+        } else {
+          summary = "-";
+        }
+        var execHtml = executionLine(item);
+        var reviewLine = "";
+        if (item.review_comment) reviewLine = "<div class='muted small mt-1'>审核意见：" + escHtml(item.review_comment) + "</div>";
+        return (
+          "<div class='border rounded p-2 mb-2 bg-white'>" +
+          "  <div class='d-flex justify-content-between align-items-start flex-wrap gap-2'>" +
+          "    <div>" +
+          "      <b>#"+ item.id + "</b> <span class='text-primary'>"+ escHtml(t) +"</span>" +
+          "      <div class='muted small mt-1'>"+ escHtml(summary) +"</div>" +
+          "    </div>" +
+          "    <div class='text-end'>" + st +
+          "      <div class='muted small mt-1'>提交时间 "+ escHtml(item.created_at || "") +"</div>" +
+          "    </div>" +
+          "  </div>" +
+          (execHtml ? "<div class='small mt-2'>" + execHtml + "</div>" : "") +
+          (item.executed_at ? "<div class='muted small mt-1'>执行时间 " + escHtml(item.executed_at) + "</div>" : "") +
+          reviewLine +
+          " </div>"
+        );
+      }).join("");
+
+      wrap.innerHTML = html;
+    }
+
+    async function loadMyRequests() {
+      const wrap = document.getElementById("myRequestsList");
+      if (wrap) wrap.textContent = "加载中…";
+      try {
+        const r = await fetch(API_MY_REQUESTS, { method: "GET" });
+        const d = await r.json().catch(()=>({}));
+        if (r.status === 401 && d && d.need_login) {
+          // 需要登录时不强制跳转，只触发一次免登
+          setStatus("需要钉钉登录后才能查看入队结果。", "err");
+          if (window.keDingTalkH5Login) window.keDingTalkH5Login();
+          return;
+        }
+        if (!r.ok || !d.ok) {
+          if (wrap) wrap.textContent = "加载失败：" + (d.msg || r.status);
+          return;
+        }
+        renderMyRequests(d.data || []);
+      } catch (e) {
+        if (wrap) wrap.textContent = "加载失败：" + e.message;
+      }
+    }
+
     document.getElementById("parseBtn").addEventListener("click", parseNlp);
     document.getElementById("enqueueBtn").addEventListener("click", enqueue);
+    const refreshBtn = document.getElementById("refreshMyReqBtn");
+    if (refreshBtn) refreshBtn.addEventListener("click", loadMyRequests);
     initTeacherTabs();
     loadMe();
+    loadMyRequests();
+
+    // 复制 JSON（给人工排查用）
+    const copyBtn = document.getElementById("copyParseBtn");
+    if (copyBtn) {
+      copyBtn.addEventListener("click", function () {
+        const preview = document.getElementById("parsePreview");
+        const txt = (preview && preview.textContent) ? preview.textContent : "";
+        if (!txt) return;
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(txt).then(function () {
+            setStatus("JSON 已复制。", "ok");
+          }).catch(function () {
+            alert("复制失败，请手动复制。");
+          });
+        } else {
+          // 老浏览器兜底
+          try {
+            const ta = document.createElement("textarea");
+            ta.value = txt;
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand("copy");
+            ta.remove();
+            setStatus("JSON 已复制。", "ok");
+          } catch (e) {
+            alert("复制失败，请手动复制。");
+          }
+        }
+      });
+    }
   </script>
 </body>
 </html>

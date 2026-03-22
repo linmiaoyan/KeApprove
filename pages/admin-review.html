@@ -22,7 +22,7 @@
         <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
             <div>
                 <div class="h5 mb-1"><i class="bi bi-clipboard-check"></i> 管理员审核</div>
-                <div class="muted">查看教师提交的申请，审核通过/驳回（当前仅更新状态，不自动执行外部接口）。</div>
+                <div class="muted">查看教师提交的申请；<b>通过</b>后将自动调用云平台/周期请假/网管等与管理中心一致的接口并记录执行结果。</div>
             </div>
             <div class="d-flex gap-2 flex-wrap">
                 <select id="statusFilter" class="form-select form-select-sm" style="max-width: 160px;">
@@ -68,7 +68,16 @@
                 <div class="modal-body">
                     <div class="muted mb-2" id="detailMeta"></div>
                     <div id="detailRequester" class="small mb-3 p-2 border rounded bg-light" style="display:none;"></div>
-                    <pre class="mono" id="detailJson"></pre>
+                    <div class="fw-semibold mb-1"><i class="bi bi-file-text"></i> 申请内容摘要</div>
+                    <div id="detailSummary" class="small mb-3 p-2 border rounded"></div>
+                    <div id="detailExecutionWrap" style="display:none;">
+                        <div class="fw-semibold mb-1"><i class="bi bi-cloud-check"></i> 审批后自动执行结果</div>
+                        <div id="detailExecution" class="small mb-3 p-2 border rounded bg-light"></div>
+                    </div>
+                    <details class="mt-2">
+                        <summary class="muted small" style="cursor:pointer;">原始数据（仅排查用）</summary>
+                        <pre class="mono mt-2 small text-secondary" id="detailJson"></pre>
+                    </details>
                     <div class="mt-3">
                         <label class="form-label">审核意见（可选）</label>
                         <textarea id="reviewComment" class="form-control" rows="2" placeholder="例如：信息不全，请补充…"></textarea>
@@ -90,6 +99,14 @@ const API_LIST = "/api/admin/requests";
 const API_GET = (id) => "/api/admin/requests/" + id;
 const API_REVIEW = (id) => "/api/admin/requests/" + id + "/review";
 
+function typeLabelZh(type) {
+    const m = { add_vehicle: "添加车牌", leave_cycle: "周期请假", reset_net_password: "重置网络密码", seal: "校章申请" };
+    return m[type] || type || "-";
+}
+function statusZh(status) {
+    const m = { pending: "待审核", approved: "已通过", rejected: "已驳回" };
+    return m[status] || status || "-";
+}
 function badge(status) {
     if (status === "pending") return '<span class="badge text-bg-secondary">待审核</span>';
     if (status === "approved") return '<span class="badge text-bg-success">已通过</span>';
@@ -126,31 +143,81 @@ function renderRequesterDetail(rq) {
     }
     box.style.display = "";
     const rows = [
-        ["展示摘要", rq.summary || rq.display_name || "-"],
-        ["姓名 / 昵称", [rq.name, rq.nick].filter(Boolean).join(" / ") || "-"],
+        ["姓名 / 摘要", rq.summary || rq.display_name || [rq.name, rq.nick].filter(Boolean).join(" · ") || "-"],
         ["手机", rq.mobile || rq.telephone || "-"],
-        ["邮箱", rq.email || rq.orgEmail || "-"],
-        ["职位", rq.title || "-"],
-        ["工号", rq.jobNumber || "-"],
-        ["钉钉 userId", rq.userId || "-"],
-        ["unionId", rq.unionId || "-"],
-        ["openId", rq.openId || "-"],
-        ["部门 deptIdList", Array.isArray(rq.deptIdList) ? rq.deptIdList.join(", ") : "-"],
-        ["企业 corpId", rq.corpId || "-"],
-        ["登录方式", rq.login_via || "-"],
-        ["钉钉登录时间", rq.login_at ? fmt(rq.login_at) : "-"],
+        ["钉钉用户ID", rq.userId || "-"],
         ["本单提交时间", rq.submitted_at ? fmt(rq.submitted_at) : "-"],
         ["提交 IP", rq.client_ip || "-"],
-        ["浏览器 UA", rq.user_agent || "-"],
     ];
-    let html = "<div class=\"fw-semibold mb-1\"><i class=\"bi bi-person-badge\"></i> 发起人（钉钉 + 提交环境）</div>";
+    let html = "<div class=\"fw-semibold mb-1\"><i class=\"bi bi-person-badge\"></i> 发起人</div>";
     html += "<table class=\"table table-sm table-borderless mb-0\"><tbody>";
     rows.forEach(([k, v]) => {
         const vv = v === "" || v === null || v === undefined ? "-" : v;
-        html += `<tr><td class=\"text-secondary\" style=\"width:9.5rem;white-space:nowrap;\">${esc(k)}</td><td class=\"mono\" style=\"word-break:break-all;\">${esc(String(vv))}</td></tr>`;
+        html += `<tr><td class=\"text-secondary\" style=\"width:7.5rem;white-space:nowrap;\">${esc(k)}</td><td style=\"word-break:break-all;\">${esc(String(vv))}</td></tr>`;
     });
     html += "</tbody></table>";
     box.innerHTML = html;
+}
+
+function studentsText(params) {
+    const s = params && params.students;
+    if (Array.isArray(s)) return s.filter(Boolean).join("、");
+    return (s && String(s).trim()) || "";
+}
+
+function renderApplicationSummary(it) {
+    const p = it.params || {};
+    if (it.type === "add_vehicle") {
+        const pt = String(p.plate_type) === "1" ? "临时" : "长期";
+        let t = "车牌号：" + (p.plate_no || "（未填）") + " · 类型：" + pt;
+        if (p.name) t += " · 姓名：" + p.name;
+        if (String(p.plate_type) === "1" && (p.start_date || p.end_date))
+            t += " · 有效期：" + (p.start_date || "?") + " 至 " + (p.end_date || "?");
+        if (p.remark) t += " · 备注：" + p.remark;
+        return t;
+    }
+    if (it.type === "leave_cycle") {
+        const stu = studentsText(p);
+        let t = (stu ? "学生：" + stu : "学生：（未填）");
+        if (p.week != null && p.week !== "" || p.weekday != null)
+            t += " · 星期：" + (p.week != null && p.week !== "" ? p.week : p.weekday);
+        if (p.reason) t += " · 原因：" + p.reason;
+        if (p.timestart || p.timeend) t += " · 时段：" + (p.timestart || "?") + "—" + (p.timeend || "?");
+        if (p.time_start || p.time_end) t += " · 日期范围：" + (p.time_start || "?") + " 至 " + (p.time_end || "?");
+        return t;
+    }
+    if (it.type === "reset_net_password") {
+        const uid = p.userId || p.user_id || p.userName || p.user_name || "";
+        return "用户标识：" + (uid || "（未填）") + " · 新密码：（已提交，不在此显示全文）";
+    }
+    if (it.type === "seal") {
+        const url = p.pdf_url || "";
+        return "已上传 PDF" + (url ? " · " + url : "") + (p.remark ? " · 备注：" + p.remark : "");
+    }
+    return "（无摘要）";
+}
+
+function renderExecutionBlock(it) {
+    const wrap = document.getElementById("detailExecutionWrap");
+    const el = document.getElementById("detailExecution");
+    if (!wrap || !el) return;
+    const ex = it.execute_result;
+    if (!ex && !it.executed_at) {
+        wrap.style.display = "none";
+        el.innerHTML = "";
+        return;
+    }
+    wrap.style.display = "";
+    let msg = "";
+    if (ex && typeof ex === "object") {
+        if (ex.skipped) msg += "【跳过自动接口】" + esc(ex.message || "");
+        else msg += (ex.ok ? "【成功】" : "【失败或未完全成功】") + esc(ex.message || "");
+        if (ex.http_status != null) msg += "（HTTP " + esc(String(ex.http_status)) + "）";
+    } else {
+        msg = "（无结构化结果）";
+    }
+    if (it.executed_at) msg += "<div class=\"muted mt-1\">执行时间：" + esc(fmt(it.executed_at)) + "</div>";
+    el.innerHTML = msg;
 }
 
 let currentDetail = null;
@@ -175,7 +242,7 @@ async function loadList() {
         tbody.innerHTML = d.map(it => `
             <tr>
                 <td>${it.id}</td>
-                <td>${it.type || "-"}</td>
+                <td>${esc(typeLabelZh(it.type))}</td>
                 <td style="max-width:220px;">${requesterCell(it.requester)}</td>
                 <td>${badge(it.status)}</td>
                 <td>${fmt(it.created_at)}</td>
@@ -196,16 +263,22 @@ async function openDetail(id) {
     currentDetail = null;
     document.getElementById("detailMeta").textContent = "加载中…";
     document.getElementById("detailJson").textContent = "";
+    const sumEl = document.getElementById("detailSummary");
+    if (sumEl) sumEl.innerHTML = "";
     renderRequesterDetail(null);
+    const exWrap = document.getElementById("detailExecutionWrap");
+    if (exWrap) exWrap.style.display = "none";
     try {
         const r = await fetch(API_GET(id));
         const d = await r.json().catch(()=>({}));
         if (!r.ok || !d.ok) throw new Error(d.msg || r.status);
         currentDetail = d.data;
         const rq = currentDetail.requester;
-        const who = rq ? (rq.summary || rq.display_name || rq.name || rq.nick || rq.userId || "-") : "-";
-        document.getElementById("detailMeta").textContent = `ID=${currentDetail.id}  类型=${currentDetail.type}  状态=${currentDetail.status}  创建=${fmt(currentDetail.created_at)}`;
+        document.getElementById("detailMeta").textContent =
+            `编号 ${currentDetail.id} · ${typeLabelZh(currentDetail.type)} · ${statusZh(currentDetail.status)} · 创建 ${fmt(currentDetail.created_at)}`;
         renderRequesterDetail(rq);
+        if (sumEl) sumEl.textContent = renderApplicationSummary(currentDetail);
+        renderExecutionBlock(currentDetail);
         document.getElementById("detailJson").textContent = JSON.stringify(currentDetail, null, 2);
         modal.show();
     } catch (e) {
@@ -224,6 +297,9 @@ async function review(approved) {
         });
         const d = await r.json().catch(()=>({}));
         if (!r.ok || !d.ok) throw new Error(d.msg || r.status);
+        if (approved && d.execution && d.execution.message) {
+            alert("已通过并已尝试执行。\n\n" + d.execution.message);
+        }
         modal.hide();
         await loadList();
     } catch (e) {

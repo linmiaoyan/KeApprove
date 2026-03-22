@@ -88,6 +88,10 @@ def _init_queue_db():
         cols = [r[1] for r in conn.execute("PRAGMA table_info(requests)").fetchall()]
         if "requester_json" not in cols:
             conn.execute("ALTER TABLE requests ADD COLUMN requester_json TEXT")
+        if "execute_result" not in cols:
+            conn.execute("ALTER TABLE requests ADD COLUMN execute_result TEXT")
+        if "executed_at" not in cols:
+            conn.execute("ALTER TABLE requests ADD COLUMN executed_at TEXT")
         conn.commit()
     finally:
         conn.close()
@@ -106,6 +110,15 @@ def _row_to_req(row):
         requester = json.loads(row["requester_json"] or "null")
     except Exception:
         requester = None
+    keys = list(row.keys())
+    exec_raw = row["execute_result"] if "execute_result" in keys else None
+    executed_at = row["executed_at"] if "executed_at" in keys else None
+    exec_obj = None
+    if exec_raw:
+        try:
+            exec_obj = json.loads(exec_raw)
+        except Exception:
+            exec_obj = {"raw": str(exec_raw)[:500]}
     return {
         "id": row["id"],
         "type": row["type"],
@@ -115,7 +128,206 @@ def _row_to_req(row):
         "created_at": row["created_at"],
         "reviewed_at": row["reviewed_at"],
         "review_comment": row["review_comment"],
+        "execute_result": exec_obj,
+        "executed_at": executed_at,
     }
+
+
+def _map_leave_params_to_cycle_body(p: dict) -> dict:
+    """将队列/NLP 中的周期请假字段映射为 _leave_cycle_submit_core 所需 body。"""
+    from datetime import date, timedelta
+
+    today = date.today().isoformat()
+    end7 = (date.today() + timedelta(days=7)).isoformat()
+    grade = str(p.get("grade") or "1").strip()
+    week_raw = p.get("week") if p.get("week") is not None else p.get("weekday")
+    week = "3"
+    if week_raw is not None:
+        ws = str(week_raw).strip()
+        if ws.isdigit():
+            try:
+                n = int(ws)
+                if 1 <= n <= 7:
+                    week = str(n)
+            except (TypeError, ValueError):
+                pass
+        else:
+            for z, d in [
+                ("一", "1"), ("二", "2"), ("三", "3"), ("四", "4"),
+                ("五", "5"), ("六", "6"), ("日", "7"), ("天", "7"),
+            ]:
+                if z in ws:
+                    week = d
+                    break
+    students = p.get("students")
+    if isinstance(students, list):
+        students_raw = "，".join(str(s).strip() for s in students if str(s).strip())
+    else:
+        students_raw = (students or p.get("students_raw") or "").strip()
+    timestart = str(p.get("timestart") or "").strip()
+    timeend = str(p.get("timeend") or "").strip()
+    t_obj = p.get("time")
+    if isinstance(t_obj, dict):
+        timestart = timestart or str(t_obj.get("timestart") or "").strip()
+        timeend = timeend or str(t_obj.get("timeend") or "").strip()
+    blob = " ".join([
+        str(p.get("timestart") or ""),
+        str(p.get("timeend") or ""),
+        str(p.get("reason") or ""),
+        str(p.get("notes") or ""),
+        str(p.get("lesson_hint") or ""),
+    ])
+    wd_for_table = None
+    try:
+        if week_raw is not None and str(week_raw).strip().isdigit():
+            wd_for_table = int(str(week_raw).strip())
+    except (TypeError, ValueError):
+        wd_for_table = None
+    hit = _wzkgz_2025s1_resolve_leave_times(wd_for_table, blob, str(p.get("lesson_hint") or ""))
+    if hit:
+        timestart, timeend = hit[0], hit[1]
+    blob_compact = blob.replace(" ", "")
+    if "晚三" in blob_compact or "晚3" in blob_compact:
+        timestart, timeend = "20:50", "21:40"
+    if not timestart or ":" not in timestart:
+        timestart = "15:15"
+    if not timeend or ":" not in timeend:
+        timeend = "15:55"
+    reason = (p.get("reason") or "").strip() or "周期请假"
+    ts = str(p.get("time_start") or p.get("timeStart") or today).strip()
+    te = str(p.get("time_end") or p.get("timeEnd") or end7).strip()
+    return {
+        "grade": grade,
+        "students": students_raw,
+        "time_start": ts,
+        "time_end": te,
+        "week": week,
+        "timestart": timestart,
+        "timeend": timeend,
+        "reason": reason,
+        "cycle_replace": str(p.get("cycle_replace") or "0"),
+        "mode": (str(p.get("mode") or "times").strip().lower() or "times"),
+        "vercode": str(p.get("vercode") or "").strip(),
+    }
+
+
+def _execute_approved_queue_item(req: dict) -> dict:
+    """管理员通过后：按类型调用与管理中心一致的云联/网管接口，返回可 JSON 序列化的结果摘要。"""
+    t = (req.get("type") or "").strip()
+    p = req.get("params") or {}
+    if not isinstance(p, dict):
+        p = {}
+    rid = req.get("id")
+    try:
+        if t == "add_vehicle":
+            data = {
+                "plate_no": (p.get("plate_no") or "").strip(),
+                "plate_type": str(p.get("plate_type") or "0"),
+                "team_uid": str(p.get("team_uid") or "").strip(),
+                "remark": (p.get("remark") or "").strip(),
+                "start_date": (p.get("start_date") or "").strip(),
+                "end_date": (p.get("end_date") or "").strip(),
+                "edu_auth_token": "",
+            }
+            if not data["plate_no"]:
+                return {"ok": False, "type": t, "id": rid, "message": "缺少车牌号，无法自动提交"}
+            if data["plate_type"] != "1" and not data["team_uid"]:
+                return {
+                    "ok": False,
+                    "type": t,
+                    "id": rid,
+                    "message": "长期车牌需在参数中填写云平台职工的 team_uid；请在管理中心「添加职工车牌」选好职工后重新入队，或驳回让教师补充。",
+                }
+            if data["plate_type"] == "1" and (not data["start_date"] or not data["end_date"]):
+                return {"ok": False, "type": t, "id": rid, "message": "临时车牌缺少开始/结束日期，无法自动提交"}
+            cloud_j, sc, need_login = _cloud_post_add_vehicle(data)
+            if need_login is not None:
+                return {
+                    "ok": False,
+                    "type": t,
+                    "id": rid,
+                    "message": "云平台需重新登录。请管理员先在管理中心完成「平台管理员登录」后再审批。",
+                    "detail": need_login,
+                }
+            ok = sc < 400 and isinstance(cloud_j, dict) and str(cloud_j.get("code")) == "200"
+            msg = (cloud_j or {}).get("msg") if isinstance(cloud_j, dict) else ""
+            return {
+                "ok": ok,
+                "type": t,
+                "id": rid,
+                "message": msg or ("云平台已受理" if ok else "云平台返回失败"),
+                "http_status": sc,
+                "cloud": cloud_j,
+            }
+
+        if t == "leave_cycle":
+            body = _map_leave_params_to_cycle_body(p)
+            out, code = _leave_cycle_submit_core(body)
+            ok = bool(out.get("ok")) and code < 400
+            return {
+                "ok": ok,
+                "type": t,
+                "id": rid,
+                "message": out.get("msg") or ("周期请假已提交" if ok else "周期请假提交失败"),
+                "http_status": code,
+                "detail": out,
+            }
+
+        if t == "reset_net_password":
+            if not CAMPUS_BASE or not CAMPUS_TOKEN:
+                return {
+                    "ok": False,
+                    "type": t,
+                    "id": rid,
+                    "message": "未配置校园网管接口（.env 中 CAMPUS_BASE / CAMPUS_TOKEN），无法自动重置密码",
+                }
+            user_id = (p.get("userId") or p.get("user_id") or "").strip()
+            password = p.get("password") or ""
+            user_name = (p.get("userName") or p.get("user_name") or user_id).strip()
+            if not user_id or not password:
+                return {"ok": False, "type": t, "id": rid, "message": "缺少用户ID或新密码，无法自动提交"}
+            url = f'{CAMPUS_BASE}/controller/campus/v1/usermgr/userpwd/{user_id}'
+            body = {
+                "userName": user_name,
+                "userId": user_id,
+                "password": password,
+                "passwordConfirm": password,
+            }
+            headers = {
+                "accept": "application/json",
+                "content-type": "application/json",
+                "x-requested-with": "XMLHttpRequest",
+                "http_x_requested_with": "XMLHttpRequest",
+                "x-uni-crsf-token": CAMPUS_TOKEN,
+                "roarand": CAMPUS_TOKEN,
+            }
+            resp = session.put(url, json=body, headers=headers, timeout=15)
+            try:
+                j = resp.json()
+            except Exception:
+                j = {"text": (resp.text or "")[:400]}
+            ok = resp.status_code < 400
+            return {
+                "ok": ok,
+                "type": t,
+                "id": rid,
+                "message": "网管接口已调用",
+                "http_status": resp.status_code,
+                "detail": j,
+            }
+
+        if t == "seal":
+            return {
+                "ok": True,
+                "type": t,
+                "id": rid,
+                "skipped": True,
+                "message": "校章为线下盖章流程，不自动调用云联；请按 PDF 与标注位置人工处理。",
+            }
+
+        return {"ok": False, "type": t, "id": rid, "message": f"未知申请类型：{t}"}
+    except Exception as e:
+        return {"ok": False, "type": t, "id": rid, "message": str(e)}
 
 
 UPLOADS_DIR = os.path.join(os.path.dirname(__file__), 'uploads')
@@ -305,6 +517,43 @@ def api_admin_list_requests():
         conn.close()
 
 
+@app.route('/api/my-requests', methods=['GET'])
+def api_my_requests():
+    """
+    仅返回“当前登录用户”的近 200 条申请，用于教师页展示“入队后结果”。
+    由于请求发起人信息存入 requester_json（钉钉资料快照），这里在服务端做过滤。
+    """
+    me = web_session.get("dt_user")
+    if not me:
+        return jsonify({'ok': False, 'need_login': True, 'msg': 'need_dingtalk_login'}), 401
+
+    uid = str(me.get("userId") or me.get("userid") or "").strip()
+    oid = str(me.get("openId") or me.get("open_id") or "").strip()
+
+    conn = _db()
+    try:
+        rows = conn.execute("SELECT * FROM requests ORDER BY id DESC LIMIT 200").fetchall()
+    finally:
+        conn.close()
+
+    out = []
+    for row in rows:
+        try:
+            requester = json.loads(row["requester_json"] or "null")
+        except Exception:
+            requester = None
+        if not isinstance(requester, dict):
+            continue
+        r_uid = str(requester.get("userId") or requester.get("userid") or "").strip()
+        r_oid = str(requester.get("openId") or requester.get("open_id") or "").strip()
+        if uid and r_uid and uid == r_uid:
+            out.append(_row_to_req(row))
+        elif oid and r_oid and oid == r_oid:
+            out.append(_row_to_req(row))
+
+    return jsonify({'ok': True, 'data': out})
+
+
 @app.route('/api/admin/requests/<int:rid>', methods=['GET'])
 def api_admin_get_request(rid: int):
     conn = _db()
@@ -329,12 +578,28 @@ def api_admin_review_request(rid: int):
         row = conn.execute("SELECT * FROM requests WHERE id=?", (rid,)).fetchone()
         if not row:
             return jsonify({'ok': False, 'msg': 'not found'}), 404
-        conn.execute(
-            "UPDATE requests SET status=?, reviewed_at=?, review_comment=? WHERE id=?",
-            (st, _now_iso(), comment, rid)
-        )
+        reviewed_at = _now_iso()
+        exec_obj = None
+        if st == "approved":
+            req_obj = _row_to_req(row)
+            exec_obj = _execute_approved_queue_item(req_obj)
+            exec_json = json.dumps(exec_obj, ensure_ascii=False, default=str)
+            executed_at = _now_iso()
+            conn.execute(
+                "UPDATE requests SET status=?, reviewed_at=?, review_comment=?, execute_result=?, executed_at=? WHERE id=?",
+                (st, reviewed_at, comment, exec_json, executed_at, rid),
+            )
+        else:
+            # 驳回：勿清空已通过时留下的执行记录（若曾误审可人工在库中处理）
+            conn.execute(
+                "UPDATE requests SET status=?, reviewed_at=?, review_comment=? WHERE id=?",
+                (st, reviewed_at, comment, rid),
+            )
         conn.commit()
-        return jsonify({'ok': True})
+        out = {"ok": True}
+        if exec_obj is not None:
+            out["execution"] = exec_obj
+        return jsonify(out)
     finally:
         conn.close()
 
@@ -1274,15 +1539,13 @@ def _leave_resolve_user_ids(sess: requests.Session, grade: str, names):
     return out
 
 
-# ---------- 5. 周期请假（教师端快捷提交） ----------
-@app.route('/api/leave-cycle', methods=['POST'])
-def api_leave_cycle():
+def _leave_cycle_submit_core(data: dict):
+    """与 /api/leave-cycle 相同逻辑，返回 (body_dict, http_status)。"""
     if not LEAVE_BASE or not LEAVE_USER or not LEAVE_PASS:
-        return jsonify({
+        return {
             'ok': False,
             'msg': '未配置周期请假：请在 .env 中设置 LEAVE_BASE、LEAVE_USER、LEAVE_PASS',
-        }), 503
-    data = request.get_json(force=True, silent=True) or {}
+        }, 503
     grade = str(data.get('grade') or '1').strip()
     students_raw = (data.get('students') or '').strip()
     time_start = (data.get('time_start') or '').strip()
@@ -1296,15 +1559,14 @@ def api_leave_cycle():
     vercode = (data.get('vercode') or '').strip()
 
     if not students_raw:
-        return jsonify({'ok': False, 'msg': 'students 为空（用逗号或换行分隔）'}), 400
+        return {'ok': False, 'msg': 'students 为空（用逗号或换行分隔）'}, 400
     if not time_start or not time_end:
-        return jsonify({'ok': False, 'msg': 'time_start 或 time_end 为空（YYYY-MM-DD）'}), 400
+        return {'ok': False, 'msg': 'time_start 或 time_end 为空（YYYY-MM-DD）'}, 400
     if not timestart or not timeend:
-        return jsonify({'ok': False, 'msg': 'timestart 或 timeend 为空（HH:MM）'}), 400
+        return {'ok': False, 'msg': 'timestart 或 timeend 为空（HH:MM）'}, 400
     if not reason:
-        return jsonify({'ok': False, 'msg': 'reason 不能为空'}), 400
+        return {'ok': False, 'msg': 'reason 不能为空'}, 400
 
-    # split names by comma / newline
     names = []
     for part in students_raw.replace('\r', '\n').replace('，', ',').split('\n'):
         for x in part.split(','):
@@ -1320,8 +1582,8 @@ def api_leave_cycle():
         if not (j.get('code') == 1 or str(j.get('code')) == '1'):
             msg = j.get('msg', '')
             if j.get('data') == 'captcha' or ('验证码' in str(msg)):
-                return jsonify({'ok': False, 'need_captcha': True, 'msg': msg or '需要验证码'}), 403
-            return jsonify({'ok': False, 'msg': msg or '登录失败', 'raw': j}), 403
+                return {'ok': False, 'need_captcha': True, 'msg': msg or '需要验证码'}, 403
+            return {'ok': False, 'msg': msg or '登录失败', 'raw': j}, 403
 
         resolved = _leave_resolve_user_ids(sess, grade, names)
         cycle_stuids = ','.join([x['user_id'] for x in resolved])
@@ -1354,22 +1616,33 @@ def api_leave_cycle():
             'referer': f'{LEAVE_BASE}/studentwork/teacher.studentleavecycle/add/grade/{grade}/time_change/{time_change}.html',
         }
         resp = sess.post(f'{LEAVE_BASE}/studentwork/teacher.studentleavecycle/add.html', data=form, headers=headers, timeout=30)
-        return jsonify({
+        return {
             'ok': True,
             'students': resolved,
             'cycle_stuids': cycle_stuids,
             'submit_status': resp.status_code,
             'submit_json': resp.json() if resp.headers.get('content-type', '').startswith('application/json') else None,
             'submit_text': (resp.text or '')[:800],
-        }), 200
+        }, 200
     except Exception as e:
-        return jsonify({'ok': False, 'msg': str(e)}), 500
+        return {'ok': False, 'msg': str(e)}, 500
 
 
-# ---------- 1. 添加职工车牌 ----------
-@app.route('/api/add-vehicle', methods=['POST'])
-def api_add_vehicle():
+# ---------- 5. 周期请假（教师端快捷提交） ----------
+@app.route('/api/leave-cycle', methods=['POST'])
+def api_leave_cycle():
     data = request.get_json(force=True, silent=True) or {}
+    body, code = _leave_cycle_submit_core(data)
+    return jsonify(body), code
+
+
+def _cloud_post_add_vehicle(data: dict):
+    """
+    调用云平台「职工/团队车辆」表单接口（与 /api/add-vehicle 相同）。
+    data: plate_no, plate_type, team_uid, remark, start_date, end_date, edu_auth_token(可选)
+    返回 (cloud_j, http_status, need_login_payload_or_None)
+    need_login_payload_or_None 非空时表示需平台登录，调用方应直接返回该 JSON。
+    """
     plate_no = (data.get('plate_no') or '').strip()
     plate_type = str(data.get('plate_type') or '0')
     team_uid = (str(data.get('team_uid') or '')).strip()
@@ -1377,14 +1650,6 @@ def api_add_vehicle():
     edu_auth_token = (data.get('edu_auth_token') or '').strip()
     start_date = (data.get('start_date') or '').strip()
     end_date = (data.get('end_date') or '').strip()
-
-    if not plate_no:
-        return jsonify({'code': 400, 'msg': 'plate_no 不能为空'}), 400
-    # 临时车牌(1)可不填职工；长期(0)必须填
-    if plate_type != '1' and not team_uid:
-        return jsonify({'code': 400, 'msg': '长期车牌请选择职工'}), 400
-    if plate_type == '1' and (not start_date or not end_date):
-        return jsonify({'code': 400, 'msg': '临时车牌请填写授权开始、结束日期'}), 400
 
     cfg = _load_eduyun_cfg()
     edu_base = cfg["server_url"]
@@ -1399,8 +1664,6 @@ def api_add_vehicle():
     if remark:
         payload['remark'] = remark
     if plate_type == '1':
-        # Verified by browser cURL:
-        # plate_type=1 requires: empdate[]=start&empdate[]=end&empsdate=start&empedate=end
         payload['empdate[]'] = [start_date, end_date]
         payload['empsdate'] = start_date
         payload['empedate'] = end_date
@@ -1408,7 +1671,6 @@ def api_add_vehicle():
     headers = {
         'accept': 'application/json, text/plain, */*',
         'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
-        # follow wwwroot_backup style: access_token
         'access_token': token,
         'x-requested-with': 'XMLHttpRequest',
     }
@@ -1416,7 +1678,6 @@ def api_add_vehicle():
     payload2 = dict(payload)
     payload2["access_token"] = token
     resp = session.post(url, data=payload2, headers=headers, timeout=15)
-    # if cloud says login required, retry with user authorization token (optional, local-only)
     try:
         j = resp.json()
         need_login = isinstance(j, dict) and (j.get("data") == "login" or "重新登录" in str(j.get("msg", "")))
@@ -1426,7 +1687,6 @@ def api_add_vehicle():
             headers2["authorization"] = edu_auth_token
             resp = session.post(url, data=payload, headers=headers2, timeout=15)
         elif need_login:
-            # try: get user access_token from platform schoolisover iframe (requires platform_session login)
             t, iframe_url, _preview = _get_schoolisover_access_token()
             if t:
                 auth_candidates = []
@@ -1451,26 +1711,24 @@ def api_add_vehicle():
                         'authorization': auth,
                     }
                     resp_try = session.post(url, data=payload, headers=headers3, timeout=15)
-                    # If auth format works, the cloud should not return 403.
                     if resp_try.status_code != 403:
                         resp = resp_try
                         break
             else:
-                return jsonify({
+                return None, 403, {
                     'code': 0,
                     'data': 'need_platform_login',
                     'msg': '云平台要求重新登录。请先在本页“平台管理员登录”成功后再添加车牌。',
                     'iframe_url': iframe_url,
-                }), 403
+                }
     except Exception:
         pass
-    # Always try to attach debug info for non-2xx responses.
+
     try:
         cloud_j = resp.json()
     except Exception:
         cloud_j = {'_raw_text_head': (resp.text or '')[:600]}
 
-    # Many cloud APIs return HTTP 200 with {code: 0, msg: '...'} for validation errors.
     code_val = None
     msg_val = None
     try:
@@ -1481,7 +1739,6 @@ def api_add_vehicle():
         pass
     need_debug = resp.status_code >= 400 or (msg_val and code_val is not None and str(code_val) != '200')
     if isinstance(cloud_j, dict) and need_debug:
-        # Avoid leaking full token; only include short head of response text.
         payload2_debug = {}
         try:
             if isinstance(payload2, dict):
@@ -1494,7 +1751,31 @@ def api_add_vehicle():
             'request_payload_head': json.dumps(payload2_debug, ensure_ascii=False)[:800],
             'cloud_text_head': (resp.text or '')[:300],
         }
-    return jsonify(cloud_j), resp.status_code
+    return cloud_j, resp.status_code, None
+
+
+# ---------- 1. 添加职工车牌 ----------
+@app.route('/api/add-vehicle', methods=['POST'])
+def api_add_vehicle():
+    data = request.get_json(force=True, silent=True) or {}
+    plate_no = (data.get('plate_no') or '').strip()
+    plate_type = str(data.get('plate_type') or '0')
+    team_uid = (str(data.get('team_uid') or '')).strip()
+    remark = (data.get('remark') or '').strip()
+    start_date = (data.get('start_date') or '').strip()
+    end_date = (data.get('end_date') or '').strip()
+
+    if not plate_no:
+        return jsonify({'code': 400, 'msg': 'plate_no 不能为空'}), 400
+    if plate_type != '1' and not team_uid:
+        return jsonify({'code': 400, 'msg': '长期车牌请选择职工'}), 400
+    if plate_type == '1' and (not start_date or not end_date):
+        return jsonify({'code': 400, 'msg': '临时车牌请填写授权开始、结束日期'}), 400
+
+    cloud_j, sc, need_login = _cloud_post_add_vehicle(data)
+    if need_login is not None:
+        return jsonify(need_login), sc
+    return jsonify(cloud_j), sc
 
 
 # ---------- 2. 部门/人员选择 ----------
