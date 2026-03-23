@@ -262,7 +262,8 @@ def _map_leave_params_to_cycle_body(p: dict) -> dict:
 
     today = date.today().isoformat()
     end7 = (date.today() + timedelta(days=7)).isoformat()
-    grade = str(p.get("grade") or "1").strip()
+    # grade：平台「关联年级」ID，与 …/add/grade/{grade}/ 一致，勿臆测为 1/2/3。
+    grade = str(p.get("grade") if p.get("grade") is not None else p.get("gids") or "1").strip()
     week_raw = p.get("week") if p.get("week") is not None else p.get("weekday")
     ws_single = str(week_raw).strip() if week_raw is not None else ""
     if ws_single and "," not in ws_single.replace("，", ",") and not ws_single.isdigit():
@@ -494,8 +495,8 @@ def api_request_parse():
     schema_hint = {
         "type": "add_vehicle",
         "params": {
-            "name": "林xx",
-            "plate_no": "浙CD12345",
+            "name": "张三",
+            "plate_no": "浙A9X000",
             "plate_type": "1",
             "start_date": _ex_today_s,
             "end_date": (_ex_today + timedelta(days=365)).isoformat(),
@@ -506,7 +507,8 @@ def api_request_parse():
     leave_cycle_hint = {
         "type": "leave_cycle",
         "params": {
-            "students": ["黄睿哲"],
+            "grade": "1",
+            "students": ["李四", "王五"],
             "weekday": 1,
             "week": "1,2,3,4,5",
             "lesson_hint": "晚三",
@@ -527,7 +529,10 @@ def api_request_parse():
         "\n"
         "规则：\n"
         "1) 车牌：识别姓名、车牌号、长期/临时；若“开一年/半年/几个月”等 → plate_type=1 并推算 start_date/end_date（YYYY-MM-DD），否则 plate_type=0。\n"
-        "2) 周期请假：students 为学生姓名数组；weekday 为 1-7（周一=1…周日=7）。若涉及多个固定星期（如「周一到周五每天」），"
+        "2) 周期请假：students 为学生姓名数组；"
+        "grade 为智慧校园「关联年级」在页面地址中的数字（…/add/grade/【此处】/…），与下拉所选年级一致，"
+        "各校编码不同，切勿默认 高一=1、高二=2、高三=3；无法从原文确定时可省略，由用户在确认表单填写。\n"
+        "weekday 为 1-7（周一=1…周日=7）。若涉及多个固定星期（如「周一到周五每天」），"
         "务必增加字段 week，值为英文逗号分隔数字，如 \"1,2,3,4,5\"（与平台一致），weekday 可填其中第一天；"
         "time_start、time_end 为请假日期范围 YYYY-MM-DD（“今天”请用当天日期，不要写汉字）；若写“每天/天天”且未给结束日，time_end 宜设为起算日起约 30 天，并在 notes 提醒教师在确认界面可改日期；"
         "timestart、timeend 必须为当天作息时段的 24小时制 HH:MM（例如晚三=20:50-21:40、下午第三节=15:15-15:55），"
@@ -1461,8 +1466,8 @@ def api_vehicle_nlp():
         return jsonify({'ok': False, 'msg': 'text 为空'}), 400
 
     schema_hint = {
-        "name": "周xx",
-        "plate_no": "浙C12345",
+        "name": "张三",
+        "plate_no": "浙A9X000",
         "plate_type": "1",
         "remark": "可选备注",
         "duration_text": "一年",
@@ -1471,8 +1476,8 @@ def api_vehicle_nlp():
     sys = (
         "你是学校信息化助手。从老师/同事发来的自然语言中提取车牌管理所需信息。\n"
         "请只输出 JSON（不要额外文字），字段：\n"
-        "- name: 姓名（有则填，无则空字符串；如“瓯拳 周秀东”中取“周秀东”）\n"
-        "- plate_no: 车牌号（保留省份简称，字母大写，如 浙CDJ9405）\n"
+        "- name: 姓名（有则填，无则空字符串；如“部门 张三”中取“张三”）\n"
+        "- plate_no: 车牌号（保留省份简称，字母大写，如 浙A9X000）\n"
         "- plate_type: \"0\"=长期，\"1\"=临时。若出现“开一年/半年/三个月/临时”等则为 \"1\"，否则 \"0\"\n"
         "- remark: 备注（可选）\n"
         "- duration_text: 仅当为临时时填时长描述，如“一年”“半年”“三个月”“一个月”，否则空字符串\n"
@@ -1845,31 +1850,77 @@ def _leave_fetch_token(sess: requests.Session, grade: str, time_change: str):
     m = re.search(r'value=[\"\']([^\"\']+)[\"\']\\s+name=[\"\']__token__[\"\']', html)
     return m.group(1) if m else ''
 
-def _leave_resolve_user_ids(sess: requests.Session, grade: str, names):
-    # names: list[str]
-    out = []
+def _leave_grade_gids_try_order(primary: str) -> list:
+    """
+    学生选择器 POST /base/selector/student 的 gids 必须与平台「关联年级」一致。
+    primary 为表单/队列里填的年级；若找不到，可按 .env LEAVE_STUDENT_SEARCH_GIDS_FALLBACK 依次尝试
+    （英文逗号分隔，如 17,18,19）。注意：重名时优先以 primary 为准，回退仅作补救。
+    """
+    seen = set()
+    order = []
+    p = str(primary or "").strip() or "1"
+    for x in [p] + [s.strip() for s in (_env_get("LEAVE_STUDENT_SEARCH_GIDS_FALLBACK", "") or "").replace("，", ",").split(",")]:
+        if not x or x in seen:
+            continue
+        seen.add(x)
+        order.append(x)
+    return order or ["1"]
+
+
+def _leave_resolve_one_name_with_gids(sess: requests.Session, gids: str, name: str) -> tuple:
+    """
+    返回 (user_id, system_name, json) ；未找到返回 ("", "", dict)。
+    """
     headers = {
         'accept': 'application/json, text/javascript, */*; q=0.01',
         'x-requested-with': 'XMLHttpRequest',
     }
-    for name in names:
-        data = {'gids': grade, 'mode': 'username', 'keylist': name}
-        resp = sess.post(f'{LEAVE_BASE}/base/selector/student', data=data, headers=headers, timeout=15)
+    data = {'gids': str(gids), 'mode': 'username', 'keylist': name}
+    resp = sess.post(f'{LEAVE_BASE}/base/selector/student', data=data, headers=headers, timeout=15)
+    try:
         j = resp.json()
-        if j.get('keyfail'):
-            raise ValueError(f"student not found: {name} (keyfail={j.get('keyfail')})")
-        rows = j.get('rows') or {}
-        uid = ''
-        sys_name = ''
-        if isinstance(rows, dict):
-            for _cls, students in rows.items():
-                if isinstance(students, list) and students:
-                    uid = str(students[0].get('user_id') or students[0].get('id') or '')
-                    sys_name = str(students[0].get('user_name') or '')
-                    break
+    except Exception:
+        return "", "", {"_parse_error": True, "text": (resp.text or "")[:200]}
+    if j.get('keyfail'):
+        return "", "", j
+    rows = j.get('rows') or {}
+    uid = ''
+    sys_name = ''
+    if isinstance(rows, dict):
+        for _cls, students in rows.items():
+            if isinstance(students, list) and students:
+                uid = str(students[0].get('user_id') or students[0].get('id') or '')
+                sys_name = str(students[0].get('user_name') or '')
+                break
+    return uid, sys_name, j
+
+
+def _leave_resolve_user_ids(sess: requests.Session, grade: str, names):
+    # names: list[str] — gids 与平台「周期请假申请」所选关联年级必须一致，不是简单的「高一=1、高二=2」。
+    out = []
+    gid_order = _leave_grade_gids_try_order(grade)
+    for name in names:
+        uid = ""
+        sys_name = ""
+        used_gid = ""
+        last_j = None
+        for gid in gid_order:
+            uid, sys_name, last_j = _leave_resolve_one_name_with_gids(sess, gid, name)
+            if uid:
+                used_gid = gid
+                break
         if not uid:
-            raise ValueError(f"cannot parse user_id for: {name}")
-        out.append({'name': name, 'user_id': uid, 'system_name': sys_name})
+            kf = (last_j or {}).get("keyfail") if isinstance(last_j, dict) else None
+            raise ValueError(
+                f"student not found: {name} (keyfail={kf}); "
+                f"tried gids={gid_order}. 请确认「关联年级」与平台地址 …/add/grade/【数字】/ 一致。"
+            )
+        out.append({
+            'name': name,
+            'user_id': uid,
+            'system_name': sys_name,
+            'matched_gid': used_gid,
+        })
     return out
 
 

@@ -58,7 +58,7 @@
     <div class="chat-card">
         <div class="form-label"><i class="bi bi-chat-dots"></i> LLM 解析（把口述内容转成表单）</div>
         <div class="chat-row">
-            <textarea class="form-control" id="llmInput" rows="3" placeholder="例如：周三晚三，邵开达、陈耀曦请假；黄睿哲周三下午第三节参加比赛"></textarea>
+            <textarea class="form-control" id="llmInput" rows="3" placeholder="例如：张三、李四，科创集训；周一到周五每天晚自习第三节。或：王五 周三下午第三节 外出比赛。"></textarea>
             <div class="chat-actions">
                 <button type="button" class="btn btn-primary-custom" id="llmParseBtn"><i class="bi bi-magic"></i> 解析并回填</button>
                 <button type="button" class="btn btn-outline-custom" id="llmFillWeekBtn"><i class="bi bi-calendar-week"></i> 仅填本周</button>
@@ -72,7 +72,7 @@
             <div class="col-md-3">
                 <label class="form-label" for="grade">关联年级（grade）</label>
                 <input type="number" class="form-control" id="grade" value="1" min="1" />
-                <div class="hint">与 URL 中 /grade/1 一致</div>
+                <div class="hint">须与智慧校园「请假申请」页地址栏一致：<code>…/add/grade/<b>此处数字</b>/…</code>。各校 ID 不同（你校曾出现 17），勿默认 1=高一、2=高二。选错年级会导致「找不到学生」。</div>
             </div>
             <div class="col-md-12">
                 <label class="form-label">星期（可多选，与平台 groupList 一致）</label>
@@ -115,7 +115,7 @@
 
             <div class="col-12">
                 <label class="form-label" for="students">学生姓名（逗号或换行分隔）</label>
-                <textarea class="form-control" id="students" rows="4" placeholder="例如：&#10;邵开达&#10;陈耀曦&#10;黄睿哲"></textarea>
+                <textarea class="form-control" id="students" rows="4" placeholder="例如：&#10;张三&#10;李四"></textarea>
                 <div class="hint">姓名必须与平台一致（如“曦/羲”易写错）</div>
             </div>
 

@@ -91,8 +91,12 @@
     <div class="teacher-panel active" id="panelQuick" role="tabpanel" aria-labelledby="tabQuick">
       <div class="cardx mb-0">
         <div class="mb-2"><b>自然语言申请（解析入队）</b></div>
-        <div class="muted small mb-2">用一句话描述需求，解析确认后提交到审批队列。</div>
-        <textarea id="nlpText" class="form-control" rows="3" placeholder="例如：帮我给周秀东加一个临时车牌 浙CDJ9405 开一年"></textarea>
+        <div class="muted small mb-2">
+          用一句话描述需求，解析确认后提交到审批队列。请尽量写全四要素，解析更准确：
+          <strong>谁</strong>（姓名/对象）、<strong>做什么</strong>（车牌/请假/重置密码等）、<strong>理由或事由</strong>、
+          <strong>具体时间或期限</strong>（起止日期、每周哪几天与课节；车牌请写明<strong>临时</strong>或<strong>长期</strong>及授权时长）。
+        </div>
+        <textarea id="nlpText" class="form-control" rows="5" placeholder="车牌示例：请为张三添加临时车牌 浙A9X000，授权一年。&#10;请假示例：李四、王五，因科创集训，周一到周五每天晚自习第三节，从今天起约两周。"></textarea>
         <div class="d-flex gap-2 mt-2 flex-wrap align-items-center">
           <button class="btn btn-primary" id="parseBtn"><i class="bi bi-magic"></i> 解析</button>
           <div id="status" class="muted"></div>
@@ -137,6 +141,7 @@
         <div class="modal-body">
           <div class="alert alert-info py-2 small" id="parseAlert">
             请确认以下信息无误。可以直接在表单中修改关键字段，再点击“入队（提交申请）”。
+            若解析不准，可回到上一步补充：<strong>谁</strong>、<strong>做什么</strong>、<strong>理由</strong>、<strong>时间/期限（临时或长期）</strong>。
           </div>
           <div id="parseHuman" class="mb-2"></div>
           <!-- 仅用于查看/复制，入队时不再直接依赖文本框内容 -->
@@ -375,9 +380,14 @@
       // 根据 type 渲染不同表单
       if (type === "leave_cycle") {
         html += "<hr class='my-2'/>";
+        html += "<div class='alert alert-warning py-2 small mb-2 mb-md-3'>";
+        html += "  <strong>关联年级（grade）</strong>必须与智慧校园「周期请假申请」里选的年级一致：打开平台请假页，看地址栏 <code>…/add/grade/<b>数字</b>/…</code>，把该数字填到下方。「学生选择器」会按此年级缩小范围；";
+        html += "  若留空或填错，高一可能仍碰巧能对，高二高三常会报 <b>找不到学生</b>。";
+        html += "</div>";
         html += "<div class='row g-2'>";
-        html += "  <div class='col-md-6'><label class='form-label small text-muted'>学生</label><input id='inp_students' class='form-control form-control-sm' placeholder='例如：张三；李四' /></div>";
-        html += "  <div class='col-md-6'><label class='form-label small text-muted'>原因</label><input id='inp_reason' class='form-control form-control-sm' placeholder='可空' /></div>";
+        html += "  <div class='col-md-4'><label class='form-label small text-muted'>关联年级 ID（grade）</label><input id='inp_leave_grade' class='form-control form-control-sm' inputmode='numeric' placeholder='如 17（以平台 URL 为准）' /></div>";
+        html += "  <div class='col-md-8'><label class='form-label small text-muted'>学生</label><input id='inp_students' class='form-control form-control-sm' placeholder='例如：张三；李四' /></div>";
+        html += "  <div class='col-md-12'><label class='form-label small text-muted'>原因</label><input id='inp_reason' class='form-control form-control-sm' placeholder='可空' /></div>";
         html += "</div>";
         html += "<div class='mt-2 border rounded p-2 bg-light'>";
         html += "  <div class='fw-semibold small mb-1'>请假日期范围（可改）</div>";
@@ -413,6 +423,7 @@
         wrap.innerHTML = html;
 
         const stuArr = Array.isArray(params.students) ? params.students : (params.students ? String(params.students).split(/[；,，\s]+/) : []);
+        setHumanValue("inp_leave_grade", params.grade != null && params.grade !== "" ? String(params.grade) : "1");
         setHumanValue("inp_students", stuArr.filter(Boolean).join("；"));
         setHumanValue("inp_reason", params.reason || "");
         setHumanValue("inp_timestart", params.timestart || "");
@@ -486,6 +497,11 @@
 
       if (type === "leave_cycle") {
         syncLeaveWeekFromChecks();
+        var gLeave = (getHumanValue("inp_leave_grade") || "").trim();
+        if (!gLeave && lastParsed.params && lastParsed.params.grade != null && String(lastParsed.params.grade).trim()) {
+          gLeave = String(lastParsed.params.grade).trim();
+        }
+        params.grade = gLeave || "1";
         params.students = (getHumanValue("inp_students") || "")
           .split(/[；,，\n]+/).map(function (x) { return x.trim(); }).filter(Boolean);
         params.week = getHumanValue("inp_week") || "";
