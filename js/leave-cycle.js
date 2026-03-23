@@ -16,17 +16,67 @@ function getCycleReplace() {
   return "0";
 }
 
-function guessWeekRange() {
-  // default: current week Monday..Sunday (local time)
+function localYMD(d) {
+  const y = d.getFullYear();
+  const m = d.getMonth() + 1;
+  const day = d.getDate();
+  return y + "-" + String(m).padStart(2, "0") + "-" + String(day).padStart(2, "0");
+}
+
+function addDaysLocal(d, n) {
+  const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  x.setDate(x.getDate() + n);
+  return x;
+}
+
+/** 默认周期：从「今天」起，便于覆盖周一到周五等多天（与后端 sanitize 的约 20 天一致） */
+function guessDefaultCycleRange() {
   const now = new Date();
-  const day = now.getDay(); // 0 Sun .. 6 Sat
+  now.setHours(0, 0, 0, 0);
+  return { start: localYMD(now), end: localYMD(addDaysLocal(now, 20)) };
+}
+
+function guessWeekRange() {
+  // 自然周 周一..周日（本地日期，避免 toISOString UTC 错位）
+  const now = new Date();
+  now.setHours(0, 0, 0, 0);
+  const day = now.getDay();
   const mondayOffset = (day === 0 ? -6 : 1) - day;
-  const monday = new Date(now);
-  monday.setDate(now.getDate() + mondayOffset);
-  const sunday = new Date(monday);
-  sunday.setDate(monday.getDate() + 6);
-  const fmt = (d) => d.toISOString().slice(0, 10);
-  return { start: fmt(monday), end: fmt(sunday) };
+  const monday = addDaysLocal(now, mondayOffset);
+  const sunday = addDaysLocal(monday, 6);
+  return { start: localYMD(monday), end: localYMD(sunday) };
+}
+
+function syncLcWeekHiddenFromChecks() {
+  const parts = [];
+  for (let i = 1; i <= 7; i++) {
+    const c = document.getElementById("lc_w" + i);
+    if (c && c.checked) parts.push(String(i));
+  }
+  const hid = document.getElementById("week");
+  if (hid) hid.value = parts.length ? parts.join(",") : "3";
+}
+
+function applyLcWeekCsv(csv) {
+  const set = {};
+  String(csv || "")
+    .split(/[,，]/)
+    .forEach((x) => {
+      const t = x.trim();
+      if (/^\d+$/.test(t)) {
+        const n = parseInt(t, 10);
+        if (n >= 1 && n <= 7) set[String(n)] = true;
+      }
+    });
+  for (let i = 1; i <= 7; i++) {
+    const c = document.getElementById("lc_w" + i);
+    if (c) c.checked = !!set[String(i)];
+  }
+  if (!Object.keys(set).length) {
+    const w = document.getElementById("lc_w3");
+    if (w) w.checked = true;
+  }
+  syncLcWeekHiddenFromChecks();
 }
 
 function setLlmOut(text, type) {
@@ -56,9 +106,10 @@ function fillFromNlp(nlp) {
     const ta = document.getElementById("students");
     if (ta) ta.value = normalizeStudents(nlp.students);
   }
-  if (nlp.weekday) {
-    const w = document.getElementById("week");
-    if (w) w.value = String(nlp.weekday);
+  if (nlp.week != null && String(nlp.week).trim()) {
+    applyLcWeekCsv(String(nlp.week).trim());
+  } else if (nlp.weekday != null && String(nlp.weekday).trim()) {
+    applyLcWeekCsv(String(nlp.weekday).trim());
   }
   const t = nlp.time || {};
   if (t.timestart) {
@@ -68,6 +119,24 @@ function fillFromNlp(nlp) {
   if (t.timeend) {
     const b = document.getElementById("timeend");
     if (b) b.value = t.timeend;
+  }
+  if (nlp.timestart) {
+    const a = document.getElementById("timestart");
+    if (a) a.value = String(nlp.timestart).trim();
+  }
+  if (nlp.timeend) {
+    const b = document.getElementById("timeend");
+    if (b) b.value = String(nlp.timeend).trim();
+  }
+  const ts = nlp.time_start || nlp.timeStart;
+  const te = nlp.time_end || nlp.timeEnd;
+  if (ts) {
+    const el = document.getElementById("timeStart");
+    if (el) el.value = String(ts).trim().slice(0, 10);
+  }
+  if (te) {
+    const el = document.getElementById("timeEnd");
+    if (el) el.value = String(te).trim().slice(0, 10);
   }
   if (typeof nlp.reason === "string" && nlp.reason.trim()) {
     const r = document.getElementById("reason");
@@ -96,7 +165,11 @@ async function llmParse() {
     fillFromNlp(parsed);
     const lines = [];
     if (parsed.students) lines.push("students: " + JSON.stringify(parsed.students, null, 0));
-    if (parsed.weekday) lines.push("weekday: " + parsed.weekday);
+    if (parsed.week) lines.push("week: " + parsed.week);
+    if (parsed.weekday != null) lines.push("weekday: " + parsed.weekday);
+    if (parsed.time_start || parsed.time_end) {
+      lines.push("周期: " + (parsed.time_start || "") + " ~ " + (parsed.time_end || ""));
+    }
     if (parsed.lesson_hint) lines.push("lesson_hint: " + parsed.lesson_hint);
     if (parsed.time && (parsed.time.timestart || parsed.time.timeend)) {
       lines.push("time: " + (parsed.time.timestart || "") + " - " + (parsed.time.timeend || ""));
@@ -117,12 +190,13 @@ function llmFillWeek() {
   const e = document.getElementById("timeEnd");
   if (s) s.value = r.start;
   if (e) e.value = r.end;
-  setLlmOut("已填入本周周期：" + r.start + " ~ " + r.end, "");
+  setLlmOut("已填入本自然周：" + r.start + " ~ " + r.end + "（与「周一到周五每天」建议用默认「今天起约20天」）", "");
 }
 
 async function submitLeave() {
   const btn = document.getElementById("submitBtn");
   const grade = (document.getElementById("grade").value || "1").trim();
+  syncLcWeekHiddenFromChecks();
   const week = (document.getElementById("week").value || "3").trim();
   const timestart = (document.getElementById("timestart").value || "").trim();
   const timeend = (document.getElementById("timeend").value || "").trim();
@@ -204,8 +278,13 @@ document.addEventListener("DOMContentLoaded", function () {
   const btn = document.getElementById("submitBtn");
   if (btn) btn.addEventListener("click", submitLeave);
 
-  // init date range to current week
-  const r = guessWeekRange();
+  document.querySelectorAll(".lc-week-cb").forEach((c) => {
+    c.addEventListener("change", syncLcWeekHiddenFromChecks);
+  });
+  syncLcWeekHiddenFromChecks();
+
+  // 默认从「今天」起一段周期（本地日期），避免 UTC 导致的星期错位
+  const r = guessDefaultCycleRange();
   const s = document.getElementById("timeStart");
   const e = document.getElementById("timeEnd");
   if (s && !s.value) s.value = r.start;

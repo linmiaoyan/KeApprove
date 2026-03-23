@@ -74,18 +74,19 @@
                 <input type="number" class="form-control" id="grade" value="1" min="1" />
                 <div class="hint">与 URL 中 /grade/1 一致</div>
             </div>
-            <div class="col-md-3">
-                <label class="form-label" for="week">星期</label>
-                <select class="form-control form-select" id="week">
-                    <option value="1">周一</option>
-                    <option value="2">周二</option>
-                    <option value="3" selected>周三</option>
-                    <option value="4">周四</option>
-                    <option value="5">周五</option>
-                    <option value="6">周六</option>
-                    <option value="7">周日</option>
-                </select>
-                <div class="hint">与平台表单一致</div>
+            <div class="col-md-12">
+                <label class="form-label">星期（可多选，与平台 groupList 一致）</label>
+                <div class="d-flex flex-wrap gap-2 align-items-center" id="weekChecks">
+                    <label class="form-check form-check-inline m-0 small"><input class="form-check-input lc-week-cb" type="checkbox" data-w="1" id="lc_w1" /> 周一</label>
+                    <label class="form-check form-check-inline m-0 small"><input class="form-check-input lc-week-cb" type="checkbox" data-w="2" id="lc_w2" /> 周二</label>
+                    <label class="form-check form-check-inline m-0 small"><input class="form-check-input lc-week-cb" type="checkbox" data-w="3" id="lc_w3" checked /> 周三</label>
+                    <label class="form-check form-check-inline m-0 small"><input class="form-check-input lc-week-cb" type="checkbox" data-w="4" id="lc_w4" /> 周四</label>
+                    <label class="form-check form-check-inline m-0 small"><input class="form-check-input lc-week-cb" type="checkbox" data-w="5" id="lc_w5" /> 周五</label>
+                    <label class="form-check form-check-inline m-0 small"><input class="form-check-input lc-week-cb" type="checkbox" data-w="6" id="lc_w6" /> 周六</label>
+                    <label class="form-check form-check-inline m-0 small"><input class="form-check-input lc-week-cb" type="checkbox" data-w="7" id="lc_w7" /> 周日</label>
+                </div>
+                <input type="hidden" id="week" value="3" />
+                <div class="hint">提交时会以英文逗号拼接传给接口（如 1,2,3,4,5）</div>
             </div>
             <div class="col-md-3">
                 <label class="form-label" for="timestart">开始时间</label>

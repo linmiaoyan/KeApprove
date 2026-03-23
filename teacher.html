@@ -404,7 +404,7 @@
         }
         html += "  </div>";
         html += "  <input type='hidden' id='inp_week' value='' />";
-        html += "  <div class='form-text small text-muted mt-1'>入队参数会保存为 1–7（多选用英文逗号分隔）。自动执行时云平台接口暂按<b>第一项</b>提交；若需每天都报请分次申请或在管理端处理。</div>";
+        html += "  <div class='form-text small text-muted mt-1'>入队参数会保存为 1–7（多选用英文逗号分隔）。管理员通过后自动提交时，会按平台表单为每个勾选的星期各生成一行 <code>groupList[i][week]</code>（同一 POST）。</div>";
         html += "</div>";
         html += "<div class='row g-2 mt-2'>";
         html += "  <div class='col-md-6'><label class='form-label small text-muted'>开始时刻（作息）</label><input id='inp_timestart' class='form-control form-control-sm' placeholder='如 15:15 或 下午第三节' /></div>";

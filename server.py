@@ -181,6 +181,81 @@ def _row_to_req(row):
     }
 
 
+def _parse_leave_week_slots(week_str) -> list:
+    """从 week 参数解析出 1-7 的列表，支持 3、'3'、'1,2,3,4,5'。"""
+    if week_str is None:
+        return [3]
+    if isinstance(week_str, int):
+        return [week_str] if 1 <= week_str <= 7 else [3]
+    ws = str(week_str).strip().replace("，", ",")
+    if not ws:
+        return [3]
+    out = []
+    for part in ws.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if part.isdigit():
+            n = int(part)
+            if 1 <= n <= 7:
+                out.append(n)
+    return out if out else [3]
+
+
+def _infer_weekday_numbers_from_leave_text(text: str):
+    """
+    从自然语言推断「涉及星期几」列表（1=周一…7=周日）。
+    命中则返回列表；否则 None（不覆盖模型结果）。
+    """
+    if not text:
+        return None
+    compact = re.sub(r"\s+", "", text)
+    if re.search(
+        r"周一到周五|周一至周五|星期一到星期五|周一到周五每天|每个工作日|工作日每天|每周一至周五|星期一到五",
+        compact,
+    ):
+        return [1, 2, 3, 4, 5]
+    if re.search(r"周一到周日|周一至周日|星期一到星期日|一周七天|全周|每天都有", compact):
+        return [1, 2, 3, 4, 5, 6, 7]
+    if re.search(r"周二到周四", compact):
+        return [2, 3, 4]
+    if re.search(r"周六周日|周六日|双休日", compact):
+        return [6, 7]
+    return None
+
+
+def _sanitize_leave_cycle_dates(params: dict, text: str) -> None:
+    """纠正明显错误的 time_start/time_end；默认从「今天」起算，避免模型胡编旧日期。"""
+    from datetime import date, timedelta
+
+    today = date.today()
+    ts = str(params.get("time_start") or params.get("timeStart") or "").strip()
+    te = str(params.get("time_end") or params.get("timeEnd") or "").strip()
+
+    def ok_iso(s: str) -> bool:
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", s):
+            return False
+        y = int(s[:4])
+        try:
+            date.fromisoformat(s)
+        except ValueError:
+            return False
+        return 2024 <= y <= 2036
+
+    if not ok_iso(ts):
+        params["time_start"] = today.isoformat()
+        ts = params["time_start"]
+    ds = date.fromisoformat(ts)
+    multi_week = "," in str(params.get("week") or "")
+    if not ok_iso(te) or te < ts:
+        if multi_week or re.search(r"周一到周五|周一至周五|星期一到星期五|工作日", text.replace(" ", "")):
+            params["time_end"] = (ds + timedelta(days=20)).isoformat()
+        else:
+            params["time_end"] = (ds + timedelta(days=13)).isoformat()
+    elif not ok_iso(te):
+        params["time_end"] = (ds + timedelta(days=13)).isoformat()
+
+
 def _map_leave_params_to_cycle_body(p: dict) -> dict:
     """将队列/NLP 中的周期请假字段映射为 _leave_cycle_submit_core 所需 body。"""
     from datetime import date, timedelta
@@ -189,33 +264,22 @@ def _map_leave_params_to_cycle_body(p: dict) -> dict:
     end7 = (date.today() + timedelta(days=7)).isoformat()
     grade = str(p.get("grade") or "1").strip()
     week_raw = p.get("week") if p.get("week") is not None else p.get("weekday")
-    week = "3"
-    if week_raw is not None:
-        ws = str(week_raw).strip()
-        if "," in ws:
-            parts = [x.strip() for x in ws.split(",") if x.strip().isdigit()]
-            if parts:
-                try:
-                    n = int(parts[0])
-                    if 1 <= n <= 7:
-                        week = str(n)
-                except (TypeError, ValueError):
-                    pass
-        elif ws.isdigit():
-            try:
-                n = int(ws)
-                if 1 <= n <= 7:
-                    week = str(n)
-            except (TypeError, ValueError):
-                pass
-        else:
+    ws_single = str(week_raw).strip() if week_raw is not None else ""
+    if ws_single and "," not in ws_single.replace("，", ",") and not ws_single.isdigit():
+        try:
+            wr_int = int(float(ws_single))
+            if 1 <= wr_int <= 7:
+                week_raw = wr_int
+        except (TypeError, ValueError):
             for z, d in [
                 ("一", "1"), ("二", "2"), ("三", "3"), ("四", "4"),
                 ("五", "5"), ("六", "6"), ("日", "7"), ("天", "7"),
             ]:
-                if z in ws:
-                    week = d
+                if z in ws_single:
+                    week_raw = int(d)
                     break
+    week_slots = _parse_leave_week_slots(week_raw)
+    week_csv = ",".join(str(x) for x in week_slots)
     students = p.get("students")
     if isinstance(students, list):
         students_raw = "，".join(str(s).strip() for s in students if str(s).strip())
@@ -234,17 +298,7 @@ def _map_leave_params_to_cycle_body(p: dict) -> dict:
         str(p.get("notes") or ""),
         str(p.get("lesson_hint") or ""),
     ])
-    wd_for_table = None
-    try:
-        wrs = str(week_raw).strip() if week_raw is not None else ""
-        if "," in wrs:
-            first = wrs.split(",")[0].strip()
-            if first.isdigit():
-                wd_for_table = int(first)
-        elif wrs.isdigit():
-            wd_for_table = int(wrs)
-    except (TypeError, ValueError):
-        wd_for_table = None
+    wd_for_table = week_slots[0] if week_slots else None
     hit = _wzkgz_2025s1_resolve_leave_times(wd_for_table, blob, str(p.get("lesson_hint") or ""))
     if hit:
         timestart, timeend = hit[0], hit[1]
@@ -263,7 +317,7 @@ def _map_leave_params_to_cycle_body(p: dict) -> dict:
         "students": students_raw,
         "time_start": ts,
         "time_end": te,
-        "week": week,
+        "week": week_csv,
         "timestart": timestart,
         "timeend": timeend,
         "reason": reason,
@@ -432,14 +486,19 @@ def api_request_parse():
     if not text:
         return jsonify({'ok': False, 'msg': 'text 为空'}), 400
 
+    from datetime import date, timedelta
+
+    _ex_today = date.today()
+    _ex_end20 = (_ex_today + timedelta(days=20)).isoformat()
+    _ex_today_s = _ex_today.isoformat()
     schema_hint = {
         "type": "add_vehicle",
         "params": {
             "name": "林xx",
             "plate_no": "浙CD12345",
             "plate_type": "1",
-            "start_date": "2026-03-19",
-            "end_date": "2027-03-19",
+            "start_date": _ex_today_s,
+            "end_date": (_ex_today + timedelta(days=365)).isoformat(),
             "remark": ""
         },
         "notes": ""
@@ -448,12 +507,13 @@ def api_request_parse():
         "type": "leave_cycle",
         "params": {
             "students": ["黄睿哲"],
-            "weekday": 3,
+            "weekday": 1,
+            "week": "1,2,3,4,5",
             "lesson_hint": "晚三",
             "timestart": "20:50",
             "timeend": "21:40",
-            "time_start": "2026-03-17",
-            "time_end": "2026-03-17",
+            "time_start": _ex_today_s,
+            "time_end": _ex_end20,
             "reason": ""
         },
         "notes": ""
@@ -467,7 +527,8 @@ def api_request_parse():
         "\n"
         "规则：\n"
         "1) 车牌：识别姓名、车牌号、长期/临时；若“开一年/半年/几个月”等 → plate_type=1 并推算 start_date/end_date（YYYY-MM-DD），否则 plate_type=0。\n"
-        "2) 周期请假：students 为学生姓名数组；weekday 为 1-7（周一=1…周日=7），文本含“今天/明天”等请换算成对应星期数字；"
+        "2) 周期请假：students 为学生姓名数组；weekday 为 1-7（周一=1…周日=7）。若涉及多个固定星期（如「周一到周五每天」），"
+        "务必增加字段 week，值为英文逗号分隔数字，如 \"1,2,3,4,5\"（与平台一致），weekday 可填其中第一天；"
         "time_start、time_end 为请假日期范围 YYYY-MM-DD（“今天”请用当天日期，不要写汉字）；若写“每天/天天”且未给结束日，time_end 宜设为起算日起约 30 天，并在 notes 提醒教师在确认界面可改日期；"
         "timestart、timeend 必须为当天作息时段的 24小时制 HH:MM（例如晚三=20:50-21:40、下午第三节=15:15-15:55），"
         "严禁把“今天/明天”等日期词填入 timestart/timeend；课节口语放入 lesson_hint（如 晚三、下午第2节）。\n"
@@ -1010,7 +1071,7 @@ def _wzkgz_2025s1_resolve_leave_times(weekday, text: str, lesson_hint: str):
     # ---------- 晚自习（优先匹配，避免「第三节」歧义）----------
     evening_rules = [
         (
-            r"晚(?:自修|自习)?\s*3|晚三|晚自习\s*3|晚自习第三|晚自习第\s*3\s*节|晚自修第三|第三节晚|晚\s*3\s*节|第三(?:节)?晚自习",
+            r"晚(?:自修|自习)?\s*3|晚三|晚自习\s*3|晚自习第三|晚自习第\s*3\s*节|晚自习第三节|晚自修第三|第三节晚|晚\s*3\s*节|第三(?:节)?晚自习",
             ("20:50", "21:40", "晚自修3"),
         ),
         (
@@ -1172,19 +1233,26 @@ def _enrich_leave_cycle_params_from_original_text(original_text: str, params: di
     if isinstance(stu, str) and stu.strip():
         params["students"] = [x.strip() for x in re.split(r"[;；,，\s\n]+", stu) if x.strip()]
 
+    inferred_multi = _infer_weekday_numbers_from_leave_text(text)
+    if inferred_multi:
+        params["week"] = ",".join(str(x) for x in inferred_multi)
+
     wd = None
+    if inferred_multi:
+        wd = inferred_multi[0]
     wd_llm = params.get("weekday")
     if wd_llm is None:
         wd_llm = params.get("week")
-    try:
-        if wd_llm is not None and str(wd_llm).strip().isdigit():
-            n = int(str(wd_llm).strip())
-            if 1 <= n <= 7:
-                wd = n
-    except (TypeError, ValueError):
-        wd = None
     if wd is None:
-        wd = _infer_leave_weekday_from_text(text)
+        try:
+            if wd_llm is not None and str(wd_llm).strip().isdigit():
+                n = int(str(wd_llm).strip())
+                if 1 <= n <= 7:
+                    wd = n
+        except (TypeError, ValueError):
+            wd = None
+        if wd is None:
+            wd = _infer_leave_weekday_from_text(text)
     if wd is not None:
         params["weekday"] = wd
 
@@ -1228,7 +1296,34 @@ def _enrich_leave_cycle_params_from_original_text(original_text: str, params: di
     if isinstance(params.get("time"), dict):
         params.pop("time", None)
 
+    _sanitize_leave_cycle_dates(params, text)
+
     return params
+
+
+def _enrich_leave_nlp_for_cycle_form(text: str, parsed: dict) -> dict:
+    """管理中心 /api/leave-nlp：从原文推断多星期、默认/纠正日期范围，供前端周期请假表单使用。"""
+    from datetime import date, timedelta
+
+    if not isinstance(parsed, dict):
+        return parsed
+    inferred = _infer_weekday_numbers_from_leave_text(text)
+    if inferred:
+        parsed["week"] = ",".join(str(x) for x in inferred)
+        parsed["weekday"] = inferred[0]
+    today = date.today()
+    ts = str(parsed.get("time_start") or parsed.get("timeStart") or "").strip()
+    te = str(parsed.get("time_end") or parsed.get("timeEnd") or "").strip()
+    shim = {"time_start": ts, "time_end": te, "week": parsed.get("week")}
+    if not shim["time_start"]:
+        shim["time_start"] = today.isoformat()
+    if not shim["time_end"]:
+        ds = date.fromisoformat(shim["time_start"])
+        shim["time_end"] = (ds + timedelta(days=20)).isoformat()
+    _sanitize_leave_cycle_dates(shim, text)
+    parsed["time_start"] = shim.get("time_start")
+    parsed["time_end"] = shim.get("time_end")
+    return parsed
 
 
 @app.route('/api/leave-nlp', methods=['POST'])
@@ -1238,10 +1333,17 @@ def api_leave_nlp():
     if not text:
         return jsonify({'ok': False, 'msg': 'text 为空'}), 400
 
+    from datetime import date, timedelta
+
+    _nlp_ex0 = date.today().isoformat()
+    _nlp_ex1 = (date.today() + timedelta(days=20)).isoformat()
     # Provide context and strict schema for JSON output
     schema_hint = {
         "students": ["姓名1", "姓名2"],
-        "weekday": 3,
+        "weekday": 1,
+        "week": "1,2,3,4,5",
+        "time_start": _nlp_ex0,
+        "time_end": _nlp_ex1,
         "time": {"timestart": "15:15", "timeend": "15:55"},
         "lesson_hint": "下午第三节/晚三/早读等原话（可空）",
         "reason": "请假原因（可空）",
@@ -1267,6 +1369,8 @@ def api_leave_nlp():
         "\n请只输出 JSON（不要额外文字），必须符合以下字段：\n"
         "- students: 学生姓名数组（去重，按出现顺序）\n"
         "- weekday: 1-7（周一=1…周日=7）。若文本含“周三/星期三”则为3。\n"
+        "- week: 可选。多个固定星期时用英文逗号分隔，如「周一到周五每天」→ \"1,2,3,4,5\"；单天可省略（仅用 weekday）。\n"
+        "- time_start、time_end: 可选，周期起止日期 YYYY-MM-DD；未说明时模型可省略（服务端会按「今天」起算并校正）。\n"
         "- time: {timestart,timeend}，必须与上面作息表一致。\n"
         "- lesson_hint: 保留原话（如“晚三”“下午第三节”），便于人工核对。\n"
         "- reason: 若文本中出现原因就提取，否则空字符串。\n"
@@ -1283,6 +1387,7 @@ def api_leave_nlp():
         # Ensure valid JSON
         parsed = json.loads(content)
         parsed = _leave_nlp_apply_wzkgz_timetable(parsed, text)
+        parsed = _enrich_leave_nlp_for_cycle_form(text, parsed)
         return jsonify({'ok': True, 'data': parsed, 'raw': content})
     except Exception as e:
         return jsonify({'ok': False, 'msg': str(e)}), 500
@@ -1768,8 +1873,31 @@ def _leave_resolve_user_ids(sess: requests.Session, grade: str, names):
     return out
 
 
+# 线上抓包（teacher.studentleavecycle/add.html）常见：固定提交 groupList[0]…groupList[9] 共 10 行，未用行为空字符串。
+# 可通过 .env LEAVE_CYCLE_GROUP_SLOTS 调整（1–30）。
+def _leave_cycle_group_list_slot_count() -> int:
+    try:
+        n = int((_env_get("LEAVE_CYCLE_GROUP_SLOTS", "10") or "10").strip())
+    except (TypeError, ValueError):
+        n = 10
+    return max(1, min(n, 30))
+
+
 def _leave_cycle_submit_core(data: dict):
-    """与 /api/leave-cycle 相同逻辑，返回 (body_dict, http_status)。"""
+    """
+    与 /api/leave-cycle 相同逻辑，返回 (body_dict, http_status)。
+
+    与智慧校园「周期请假申请」页对齐的批量约定（与 ThinkPHP 表单一致，需与线上页面抓包核对）：
+    - 端点：POST {LEAVE_BASE}/studentwork/teacher.studentleavecycle/add.html
+    - Content-Type：application/x-www-form-urlencoded
+    - 多名学生：cycle_stuids 为多个 user_id 的英文逗号拼接，一次提交即平台理解的「批量学生」。
+    - 多天/多时段：同一 POST 内使用多条 groupList[i]，每条含 week(1–7)、timestart、timeend、lessoncode。
+      浏览器通常会固定 POST 多行（如 0..9），未勾选行为 week/lessoncode/timestart/timeend 全空；本实现默认补齐到
+      LEAVE_CYCLE_GROUP_SLOTS（默认 10），与常见抓包一致。
+    - 从课表/节次选择器提交时 lessoncode 可能非空（如 K[week]2w）；纯手填时刻时多为空。请求 JSON 可传 lessoncode
+      与平台一致；不传则对有效行填空字符串。
+    - 与页面 URL 一致：先 GET …/add/grade/{grade}/time_change/{times|lesson}.html 取 __token__（勿让 time_change 为 undefined）。
+    """
     if not LEAVE_BASE or not LEAVE_USER or not LEAVE_PASS:
         return {
             'ok': False,
@@ -1780,12 +1908,14 @@ def _leave_cycle_submit_core(data: dict):
     time_start = (data.get('time_start') or '').strip()
     time_end = (data.get('time_end') or '').strip()
     week = str(data.get('week') or '3').strip()
+    week_slots = _parse_leave_week_slots(week)
     timestart = (data.get('timestart') or '').strip()
     timeend = (data.get('timeend') or '').strip()
     reason = (data.get('reason') or '').strip()
     cycle_replace = str(data.get('cycle_replace') or '0').strip()
     mode = (data.get('mode') or 'times').strip().lower()
     vercode = (data.get('vercode') or '').strip()
+    lessoncode_tpl = str(data.get('lessoncode') or data.get('lesson_code') or '').strip()
 
     if not students_raw:
         return {'ok': False, 'msg': 'students 为空（用逗号或换行分隔）'}, 400
@@ -1820,6 +1950,7 @@ def _leave_cycle_submit_core(data: dict):
         time_change = 'lesson' if mode == 'lesson' else 'times'
         token = _leave_fetch_token(sess, grade, time_change)
 
+        slot_n = _leave_cycle_group_list_slot_count()
         form = {
             'grade': grade,
             'time_change': time_change,
@@ -1830,11 +1961,19 @@ def _leave_cycle_submit_core(data: dict):
             'reason': reason,
             'leave_school': str(data.get('leave_school') or '0'),
             'id': '',
-            'groupList[0][week]': week,
-            'groupList[0][lessoncode]': '',
-            'groupList[0][timestart]': timestart,
-            'groupList[0][timeend]': timeend,
         }
+        for i in range(slot_n):
+            if i < len(week_slots):
+                wn = week_slots[i]
+                form[f'groupList[{i}][week]'] = str(wn)
+                form[f'groupList[{i}][lessoncode]'] = lessoncode_tpl
+                form[f'groupList[{i}][timestart]'] = timestart
+                form[f'groupList[{i}][timeend]'] = timeend
+            else:
+                form[f'groupList[{i}][week]'] = ''
+                form[f'groupList[{i}][lessoncode]'] = ''
+                form[f'groupList[{i}][timestart]'] = ''
+                form[f'groupList[{i}][timeend]'] = ''
         if token:
             form['__token__'] = token
 
@@ -1852,6 +1991,28 @@ def _leave_cycle_submit_core(data: dict):
             'submit_status': resp.status_code,
             'submit_json': resp.json() if resp.headers.get('content-type', '').startswith('application/json') else None,
             'submit_text': (resp.text or '')[:800],
+            # 便于与浏览器 F12 中平台原生表单对照：学生批量条数、星期行数、模式
+            'post_summary': {
+                'endpoint': 'studentwork/teacher.studentleavecycle/add.html',
+                'time_change': time_change,
+                'groupList_slot_count': slot_n,
+                'student_count': len(resolved),
+                'groupList_rows_filled': len(week_slots),
+                'week_slots': week_slots,
+                'lessoncode_sent': bool(lessoncode_tpl),
+                'form_keys_sample': [
+                    'grade',
+                    'time_change',
+                    'cycle_replace',
+                    'cycle_stuids',
+                    'time_start',
+                    'time_end',
+                    'reason',
+                    'leave_school',
+                    'id',
+                ]
+                + [f'groupList[{i}][week]' for i in range(min(slot_n, 4))],
+            },
         }, 200
     except Exception as e:
         return {'ok': False, 'msg': str(e)}, 500
